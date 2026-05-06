@@ -1,5 +1,13 @@
 """LLM transcript signing primitives."""
 
+from importlib.metadata import PackageNotFoundError as _PkgNotFound
+from importlib.metadata import version as _pkg_version
+
+try:
+    __version__ = _pkg_version("llm-sign")
+except _PkgNotFound:  # pragma: no cover - source checkout without install
+    __version__ = "0.0.0+unknown"
+
 from . import client, server
 from .core.blocks import (
     Block,
@@ -32,6 +40,7 @@ from .vendor import TLSCertificateCredential
 from .verifier import load_signed_blocks, verify_artifact
 
 __all__ = [
+    "__version__",
     "Block",
     "ChainVerification",
     "Ed25519KeyPair",

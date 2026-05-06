@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from llm_sign import __version__ as _LIB_VERSION
 from llm_sign.core.blocks import (
     PROVIDER_OUTPUT,
     PROVIDER_RECEIVED_INPUT,
@@ -18,6 +19,13 @@ from llm_sign.vendor import TLSCertificateCredential, load_pem_certificates
 DEFAULT_ISSUER = "provider.example"
 OPENAI_COMPATIBLE_PLATFORM = "openai-compatible"
 ARTIFACT_SCHEMA = "llm-sign.artifact.v1"
+
+# Minimum verifier version that can fully process artifacts produced by this
+# library version. Bump this only when the wire format introduces a change
+# that older verifiers cannot interpret correctly. It is *not* automatically
+# tied to ``__version__`` so that minor library updates with backwards
+# compatible artifacts do not force every verifier in the wild to upgrade.
+DEFAULT_MIN_VERIFIER_VERSION = "0.1.0"
 
 
 def generate_ed25519_key_pair() -> Ed25519KeyPair:
@@ -110,11 +118,27 @@ def create_artifact(
     turns: Optional[Sequence[Mapping[str, Any]]] = None,
     payloads: Optional[Mapping[int, Any]] = None,
     platform: str = OPENAI_COMPATIBLE_PLATFORM,
+    min_verifier_version: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build the standard JSON artifact envelope from signed blocks."""
+    """Build the standard JSON artifact envelope from signed blocks.
+
+    The ``library`` field is informational metadata: it records the signing
+    library version and the minimum verifier version needed to interpret the
+    artifact. Both values are excluded from the canonical signing digest, so
+    upgrading the library never invalidates already-signed artifacts.
+
+    A verifier observing ``library.min_verifier_version`` higher than its own
+    ``llm_sign.__version__`` should refuse the artifact and tell the operator
+    to upgrade rather than silently produce a misleading "valid" result.
+    """
 
     artifact: Dict[str, Any] = {
         "schema": ARTIFACT_SCHEMA,
+        "library": {
+            "name": "llm_sign",
+            "version": _LIB_VERSION,
+            "min_verifier_version": min_verifier_version or DEFAULT_MIN_VERIFIER_VERSION,
+        },
         "platform": platform,
         "chain": [block.to_dict() for block in chain],
     }
@@ -128,6 +152,7 @@ def create_artifact(
 __all__ = [
     "ARTIFACT_SCHEMA",
     "DEFAULT_ISSUER",
+    "DEFAULT_MIN_VERIFIER_VERSION",
     "OPENAI_COMPATIBLE_PLATFORM",
     "TLSCertificateCredential",
     "create_artifact",
