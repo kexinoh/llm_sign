@@ -30,7 +30,14 @@ def certificate_key_id(cert: x509.Certificate) -> str:
     return "spki-sha256:" + b64url_encode(hashlib.sha256(spki).digest())
 
 
-def load_pem_certificates(data: bytes) -> list[x509.Certificate]:
+def load_pem_certificates(data: bytes | str) -> list[x509.Certificate]:
+    """Parse one or more PEM-encoded X.509 certificates.
+
+    Accepts either ``bytes`` or ``str``. ``str`` inputs are encoded as ASCII
+    before parsing, which matches how PEM is defined.
+    """
+    if isinstance(data, str):
+        data = data.encode("ascii")
     marker = b"-----END CERTIFICATE-----"
     certificates = []
     for part in data.split(marker):

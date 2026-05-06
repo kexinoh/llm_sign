@@ -62,6 +62,25 @@ class OpenAIChatInputProfile:
         return canonical_json_bytes(projected)
 
 
+def project_openai_chat_request(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop fields the OpenAI Chat Completions input profile does not sign.
+
+    Useful for integrations whose request schema extends OpenAI's (vLLM,
+    proxies, gateways): canonicalization is a strict whitelist over the
+    OpenAI-defined input fields, so any platform-specific knobs (``logprobs``,
+    ``min_tokens``, ``request_id``, ``skip_special_tokens``, ...) must be
+    removed before signing.
+
+    Returns a new dict containing only the fields the
+    :class:`OpenAIChatInputProfile` would consider.
+    """
+    allowed = (
+        OpenAIChatInputProfile.include_fields
+        | OpenAIChatInputProfile.exclude_fields
+    )
+    return {k: v for k, v in payload.items() if k in allowed}
+
+
 class OpenAIChatOutputProfile:
     """Canonicalizes OpenAI Chat Completions response-shaped payloads."""
 
@@ -98,6 +117,27 @@ class OpenAIChatOutputProfile:
             profile_name=self.profile_id,
         )
         return canonical_json_bytes(projected)
+
+
+def project_openai_chat_response(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop fields the OpenAI Chat Completions output profile does not sign.
+
+    Mirror of :func:`project_openai_chat_request` for response payloads.
+    Useful for integrations that attach platform-specific fields to the
+    response object (e.g. vLLM's ``prompt_logprobs``, ``prompt_token_ids``,
+    ``kv_transfer_params``, ``llm_sign``). These are not part of the OpenAI
+    Chat Completions output schema and must be removed before signing so
+    that any client re-canonicalizing the HTTP body computes the same
+    payload digest.
+
+    Returns a new dict containing only the fields the
+    :class:`OpenAIChatOutputProfile` would consider.
+    """
+    allowed = (
+        OpenAIChatOutputProfile.include_fields
+        | OpenAIChatOutputProfile.exclude_fields
+    )
+    return {k: v for k, v in payload.items() if k in allowed}
 
 
 class OpenAIToolResultProfile:

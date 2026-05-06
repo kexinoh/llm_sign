@@ -41,26 +41,100 @@ def trust_public_key(
 def verify_with_public_key(
     artifact: Mapping[str, Any],
     *,
-    issuer: str,
-    key_id: str,
     public_key: Any,
+    issuer: Optional[str] = None,
+    key_id: Optional[str] = None,
     suite_id: Optional[str] = None,
     platform: Optional[str] = None,
     payloads: Optional[Mapping[int, Any]] = None,
 ) -> ChainVerification:
-    """Verify an artifact against one trusted public key."""
+    """Verify an artifact against one trusted public key.
+
+    ``issuer``, ``key_id``, ``suite_id`` and ``platform`` are optional: when
+    omitted they are read from the artifact's first signed block (or the
+    artifact envelope for ``platform``). Pinning them explicitly is still
+    recommended in production, since reading them from the artifact means
+    the verifier accepts whatever issuer the signer claimed; as long as the
+    public key matches the signature this is sound, but it skips the
+    "did this artifact come from the issuer I expected" check.
+    """
+
+    block_metadata = _first_block_metadata(artifact)
+    resolved_issuer = issuer if issuer is not None else block_metadata.get("issuer")
+    resolved_key_id = key_id if key_id is not None else block_metadata.get("key_id")
+    resolved_suite_id = (
+        suite_id if suite_id is not None else block_metadata.get("suite_id")
+    )
+    resolved_platform = (
+        platform if platform is not None else artifact.get("platform")
+    )
+    if resolved_issuer is None:
+        raise ValueError(
+            "issuer is required and could not be inferred from the artifact"
+        )
+    if resolved_key_id is None:
+        raise ValueError(
+            "key_id is required and could not be inferred from the artifact"
+        )
 
     return verify_artifact(
         artifact,
         key_policy=trust_public_key(
-            issuer=issuer,
-            key_id=key_id,
+            issuer=resolved_issuer,
+            key_id=resolved_key_id,
             public_key=public_key,
-            suite_id=suite_id,
+            suite_id=resolved_suite_id,
         ),
+        platform=resolved_platform,
+        payloads=payloads,
+    )
+
+
+def verify_openai_response_with_public_key(
+    response: Mapping[str, Any],
+    *,
+    public_key: Any,
+    issuer: Optional[str] = None,
+    key_id: Optional[str] = None,
+    suite_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    payloads: Optional[Mapping[int, Any]] = None,
+) -> ChainVerification:
+    """Verify an OpenAI-compatible response using a pinned public key.
+
+    Convenience wrapper that extracts the artifact from the response and
+    delegates to :func:`verify_with_public_key`. All metadata parameters
+    behave the same: optional, inferred from the artifact when omitted.
+    """
+    artifact = artifact_from_openai_response(response)
+    return verify_with_public_key(
+        artifact,
+        public_key=public_key,
+        issuer=issuer,
+        key_id=key_id,
+        suite_id=suite_id,
         platform=platform,
         payloads=payloads,
     )
+
+
+def _first_block_metadata(artifact: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return ``{issuer, key_id, suite_id}`` from the artifact's first block."""
+    chain = artifact.get("chain", artifact.get("signed_blocks"))
+    if not isinstance(chain, list) or not chain:
+        return {}
+    first = chain[0]
+    if not isinstance(first, Mapping):
+        return {}
+    block = first.get("block")
+    if not isinstance(block, Mapping):
+        return {}
+    out: Dict[str, Any] = {}
+    for k in ("issuer", "key_id", "suite_id"):
+        v = block.get(k)
+        if isinstance(v, str):
+            out[k] = v
+    return out
 
 
 def artifact_from_openai_response(response: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -374,6 +448,7 @@ __all__ = [
     "artifact_from_openai_response",
     "certificate_key_id",
     "certificate_chain_from_openai_response",
+    "load_pem_certificates",
     "load_signed_blocks",
     "load_system_trust_anchors",
     "host_name_from_artifact",
@@ -383,6 +458,7 @@ __all__ = [
     "trust_public_key",
     "verify_openai_response_signature",
     "verify_openai_response_with_certificate_chain",
+    "verify_openai_response_with_public_key",
     "verification_summary",
     "verify_artifact",
     "verify_with_public_key",
