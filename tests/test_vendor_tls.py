@@ -1,0 +1,196 @@
+import datetime as dt
+import tempfile
+import unittest
+from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+from llm_sign import OpenAIChatInputProfile, verify_chain
+from llm_sign.blocks import PROVIDER_RECEIVED_INPUT
+from llm_sign.keys.x509 import X509KeyPolicy
+from llm_sign.vendor import TLSCertificateCredential
+
+
+class VendorTlsTests(unittest.TestCase):
+    def test_vllm_tls_rsa_certificate_signs_and_verifies(self):
+        root_key, root_cert = _rsa_root_ca()
+        leaf_key, leaf_cert = _rsa_server_cert(root_key, root_cert, "vllm.example")
+        with tempfile.TemporaryDirectory() as tmp:
+            certfile = Path(tmp) / "fullchain.pem"
+            keyfile = Path(tmp) / "privkey.pem"
+            certfile.write_bytes(
+                leaf_cert.public_bytes(serialization.Encoding.PEM)
+                + root_cert.public_bytes(serialization.Encoding.PEM)
+            )
+            keyfile.write_bytes(
+                leaf_key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                )
+            )
+
+            credential = TLSCertificateCredential.from_files(
+                ssl_certfile=certfile,
+                ssl_keyfile=keyfile,
+            )
+
+        self.assertEqual(credential.issuer, "vllm.example")
+        self.assertEqual(credential.suite_id, "sha256-rsa-pss-v1")
+
+        profile = OpenAIChatInputProfile()
+        payload = {
+            "model": "Qwen/Qwen3-Coder",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        signed = credential.signer().sign_payload(
+            block_type=PROVIDER_RECEIVED_INPUT,
+            profile=profile,
+            payload=payload,
+        )
+        policy = X509KeyPolicy(
+            trust_anchors=[root_cert],
+            certificate_chains=[credential.certificate_chain],
+            issuer_binding="tls-server-name",
+            allow_tls_server_auth=True,
+        )
+
+        result = verify_chain(
+            [signed],
+            key_policy=policy,
+            profiles={profile.profile_id: profile},
+            payloads={0: payload},
+        )
+
+        self.assertTrue(result.valid, result.errors)
+
+    def test_tls_server_name_mode_allows_certificate_without_eku(self):
+        root_key, root_cert = _rsa_root_ca()
+        leaf_key, leaf_cert = _rsa_server_cert(
+            root_key,
+            root_cert,
+            "vllm.example",
+            include_eku=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            certfile = Path(tmp) / "fullchain.pem"
+            keyfile = Path(tmp) / "privkey.pem"
+            certfile.write_bytes(
+                leaf_cert.public_bytes(serialization.Encoding.PEM)
+                + root_cert.public_bytes(serialization.Encoding.PEM)
+            )
+            keyfile.write_bytes(
+                leaf_key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                )
+            )
+
+            credential = TLSCertificateCredential.from_files(
+                ssl_certfile=certfile,
+                ssl_keyfile=keyfile,
+            )
+
+        profile = OpenAIChatInputProfile()
+        payload = {
+            "model": "Qwen/Qwen3-Coder",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        signed = credential.signer().sign_payload(
+            block_type=PROVIDER_RECEIVED_INPUT,
+            profile=profile,
+            payload=payload,
+        )
+        policy = X509KeyPolicy(
+            trust_anchors=[root_cert],
+            certificate_chains=[credential.certificate_chain],
+            issuer_binding="tls-server-name",
+            allow_tls_server_auth=True,
+        )
+
+        result = verify_chain(
+            [signed],
+            key_policy=policy,
+            profiles={profile.profile_id: profile},
+            payloads={0: payload},
+        )
+
+        self.assertTrue(result.valid, result.errors)
+
+
+def _rsa_root_ca():
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test root")])
+    now = dt.datetime.now(dt.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=True,
+                key_encipherment=False,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+                crl_sign=True,
+            ),
+            critical=True,
+        )
+        .sign(private_key=key, algorithm=hashes.SHA256())
+    )
+    return key, cert
+
+
+def _rsa_server_cert(root_key, root_cert, dns_name, include_eku=True):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, dns_name)])
+    now = dt.datetime.now(dt.timezone.utc)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(root_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                key_encipherment=True,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+                crl_sign=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
+    )
+    if include_eku:
+        builder = builder.add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+    cert = builder.sign(private_key=root_key, algorithm=hashes.SHA256())
+    return key, cert
+
+
+if __name__ == "__main__":
+    unittest.main()

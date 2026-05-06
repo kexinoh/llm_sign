@@ -1,0 +1,195 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                         LLM_SIGN: WHAT IT IS & IS NOT                         ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+┌─ THE BOTTOM LINE ────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  ✗ NOT a proxy server       ✗ NOT monkey-patching    ✗ NOT HTTP intercept  │
+│  ✓ IS a cryptographic library for signing/verifying LLM transcripts        │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ WHAT IT ACTUALLY DOES ──────────────────────────────────────────────────────┐
+│                                                                              │
+│  1. CRYPTOGRAPHY                                                            │
+│     • Signs JSON request/response pairs with Ed25519 (or RSA-PSS/ECDSA)   │
+│     • Creates binary-encoded blocks with digests                          │
+│     • Chains blocks together (Merkle-like structure)                       │
+│                                                                              │
+│  2. CANONICALIZATION                                                        │
+│     • Defines how to hash OpenAI Chat Completions consistently            │
+│     • Field ordering, numeric precision, etc.                            │
+│                                                                              │
+│  3. VERIFICATION                                                            │
+│     • Checks signatures against trusted keys (static or X.509)            │
+│     • Validates certificate chains                                         │
+│     • Detects tampering                                                    │
+│                                                                              │
+│  4. CLI TOOL (llm-sign-verify)                                            │
+│     • Offline verification: reads artifact JSON, outputs verification     │
+│     • No network calls                                                     │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ THE PLATFORM ADAPTERS ──────────────────────────────────────────────────────┐
+│                                                                              │
+│  openai_compatible.py      Maps artifact turns -> indexed payloads (JSON)  │
+│  vllm.py                   Inherits from OpenAI adapter (no changes)       │
+│  codex_cli.py              Inherits from OpenAI adapter (no changes)       │
+│  kimi_cli.py               Inherits from OpenAI adapter (no changes)       │
+│                                                                              │
+│  → These are just data mappers, not integration points                    │
+│  → They extract JSON fields, don't touch HTTP                             │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ THE SERVER API (src/llm_sign/server/__init__.py) ────────────────────────────┐
+│                                                                              │
+│  generate_ed25519_key_pair()      → Create signing key                    │
+│  create_signer(...)               → Create TranscriptSigner object        │
+│  sign_openai_chat_turn(...)       → Sign 1 turn (pure function)          │
+│  sign_openai_chat_turns(...)      → Sign N turns (pure function)         │
+│  create_artifact(...)             → Build artifact JSON (pure function)   │
+│                                                                              │
+│  All pure functions: JSON in → Signed JSON out                           │
+│  NO HTTP, NO I/O, NO SERVER                                              │
+│                                                                              │
+│  Usage by provider:                                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │ 1. Generate key pair offline                                        │  │
+│  │ 2. Create signer (keep in memory)                                   │  │
+│  │ 3. For each API request:                                            │  │
+│  │    a. Call LLM (using any framework)                               │  │
+│  │    b. Call llm_sign.server.sign_openai_chat_turn()                │  │
+│  │    c. Include artifact in response JSON                            │  │
+│  │    d. Return response via HTTP (provider's server code)            │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ THE CLIENT API (src/llm_sign/client/__init__.py) ──────────────────────────┐
+│                                                                              │
+│  trust_public_key(...)                          → Create key policy        │
+│  verify_with_public_key(...)                    → Verify with hardcoded key│
+│  verify_openai_response_signature(...)          → Optional verification   │
+│  verify_openai_response_with_certificate_chain  → X.509 validation        │
+│  artifact_from_openai_response(...)             → Extract artifact        │
+│  certificate_chain_from_openai_response(...)    → Extract cert chain      │
+│  load_system_trust_anchors()                    → Read system CAs         │
+│                                                                              │
+│  Usage by client:                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │ 1. Call OpenAI SDK (or any client):                                 │  │
+│  │    response = openai.Client().chat.completions.create(...)         │  │
+│  │                                                                      │  │
+│  │ 2. Pass response dict to llm_sign:                                  │  │
+│  │    report = llm_sign.client.verify_openai_response_signature(resp) │  │
+│  │                                                                      │  │
+│  │ 3. Check report:                                                    │  │
+│  │    if report.has_signature and not report.valid:                   │  │
+│  │        raise Exception("Bad signature!")                           │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  → Backward compatible: unsigned responses work (valid=None)              │
+│  → No modifications to OpenAI SDK behavior                                │
+│  → Just calling verification functions on response dicts                  │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ THE TEST INFRASTRUCTURE ────────────────────────────────────────────────────┐
+│                                                                              │
+│  tests/e2e_support/server.py     Mock HTTP server for testing             │
+│  tests/e2e_support/proxy.py      Mock proxy for testing tampering         │
+│                                                                              │
+│  ⚠ IMPORTANT:                                                              │
+│  • Located in tests/ directory, NOT src/                                   │
+│  • Used ONLY for testing the verification APIs                            │
+│  • Not deployed with the library                                          │
+│  • Not meant for production use                                           │
+│  • Reference implementation of how to use signing APIs                    │
+│                                                                              │
+│  Response modes:                                                           │
+│  • artifact-envelope: {"artifact": {...}}                                 │
+│  • openai-compatible: {"choices": [...], "llm_sign": {"artifact": ...}}   │
+│  • openai-compatible-unsigned: {"choices": [...]}                         │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ WHAT IT DOES NOT HAVE ──────────────────────────────────────────────────────┐
+│                                                                              │
+│  ✗ No FastAPI, Flask, Django, or web framework                            │
+│  ✗ No HTTP server listening on a port                                     │
+│  ✗ No request/response interceptors or middleware                         │
+│  ✗ No monkey-patching of urllib, requests, httpx, or OpenAI SDK          │
+│  ✗ No proxy routing or load balancing                                     │
+│  ✗ No daemon process or background service                                │
+│  ✗ No key management or storage                                           │
+│  ✗ No certificate generation (X.509 - that's on the provider)            │
+│  ✗ No deployment configuration (Docker, K8s, etc.)                        │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ HOW A REAL DEPLOYMENT WOULD WORK ───────────────────────────────────────────┐
+│                                                                              │
+│  PROVIDER (signs responses):                                               │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ apiserver.py (built by provider using FastAPI, Flask, Django, etc)   │  │
+│  │                                                                       │  │
+│  │ import llm_sign                                                      │  │
+│  │ signer = llm_sign.server.create_signer(...)                        │  │
+│  │                                                                       │  │
+│  │ @app.post("/v1/chat/completions")                                   │  │
+│  │ def chat_completions(request):                                      │  │
+│  │     response = call_my_llm(request)  # Call LLM                     │  │
+│  │     artifact = llm_sign.server.sign_openai_chat_turn(              │  │
+│  │         request=request,                                            │  │
+│  │         response=response,                                          │  │
+│  │         signer=signer                                               │  │
+│  │     )                                                                │  │
+│  │     return {                                                         │  │
+│  │         **response,                                                  │  │
+│  │         "llm_sign": {"artifact": artifact}                          │  │
+│  │     }                                                                │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  CLIENT (verifies responses):                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ client.py (built by client using standard OpenAI SDK)               │  │
+│  │                                                                       │  │
+│  │ from openai import OpenAI                                           │  │
+│  │ import llm_sign                                                      │  │
+│  │                                                                       │  │
+│  │ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))               │  │
+│  │ response = client.chat.completions.create(                         │  │
+│  │     model="gpt-4",                                                   │  │
+│  │     messages=[...]                                                   │  │
+│  │ )                                                                     │  │
+│  │                                                                       │  │
+│  │ report = llm_sign.client.verify_openai_response_signature(response) │  │
+│  │ if report.has_signature and not report.valid:                       │  │
+│  │     raise Exception("Bad signature!")                               │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│  → llm_sign is just the library at the edge of each system                 │
+│  → Provider and client each own their HTTP infrastructure                  │
+│  → llm_sign connects them via signed artifacts in JSON                     │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ DEPENDENCIES ───────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  Core:       cryptography>=42  (for crypto operations)                     │
+│  Optional:   openai>=1         (only for examples)                         │
+│                                                                              │
+│  NO: requests, httpx, urllib, FastAPI, Flask, Django, etc.               │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─ ENTRY POINT ────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  Binary: llm-sign-verify (CLI tool only)                                  │
+│  No server entry point                                                     │
+│  No daemon services                                                        │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+

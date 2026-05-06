@@ -1,0 +1,11 @@
+ISSUER = "deterministic-provider.example"
+MODEL = "deterministic-random-llm"
+NUMBER_COUNT = 1000
+INPUT_SEED = 1103515245
+OUTPUT_SEED = 12345
+SUITE_ID = "sha256-ed25519-v1"
+RESPONSE_ID = "chatcmpl-deterministic"
+TOOL_CALL_ID = "call_deterministic_numbers"
+TOOL_NAME = "deterministic_numbers"
+SECOND_TOOL_CALL_ID = "call_deterministic_summary"
+SECOND_TOOL_NAME = "deterministic_summary"
