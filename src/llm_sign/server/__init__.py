@@ -19,6 +19,10 @@ DEFAULT_ISSUER = "provider.example"
 OPENAI_COMPATIBLE_PLATFORM = "openai-compatible"
 ARTIFACT_SCHEMA = "llm-sign.artifact.v1"
 
+# Artifact protocol version this build produces. A single integer tied to
+# the wire format (see llm_sign.verifier.SUPPORTED_PROTOCOL_VERSION).
+PROTOCOL_VERSION = 1
+
 
 def generate_ed25519_key_pair() -> Ed25519KeyPair:
     """Generate an Ed25519 transcript signing key pair."""
@@ -110,11 +114,30 @@ def create_artifact(
     turns: Optional[Sequence[Mapping[str, Any]]] = None,
     payloads: Optional[Mapping[int, Any]] = None,
     platform: str = OPENAI_COMPATIBLE_PLATFORM,
+    min_reader_version: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Build the standard JSON artifact envelope from signed blocks."""
+    """Build the standard JSON artifact envelope from signed blocks.
+
+    The ``protocol`` field records the artifact's wire protocol version
+    and the minimum reader version needed to interpret it. Both values
+    live at the envelope level, outside the per-block payload digest, so
+    this metadata never affects signature validity.
+
+    A reader whose ``SUPPORTED_PROTOCOL_VERSION`` is lower than the
+    artifact's ``protocol.min_reader_version`` should refuse it (see
+    :func:`llm_sign.verifier.check_artifact_protocol_compatibility`)
+    rather than silently produce a misleading "valid" result.
+    """
 
     artifact: Dict[str, Any] = {
         "schema": ARTIFACT_SCHEMA,
+        "protocol": {
+            "version": PROTOCOL_VERSION,
+            "min_reader_version": (
+                min_reader_version if min_reader_version is not None
+                else PROTOCOL_VERSION
+            ),
+        },
         "platform": platform,
         "chain": [block.to_dict() for block in chain],
     }
@@ -129,6 +152,7 @@ __all__ = [
     "ARTIFACT_SCHEMA",
     "DEFAULT_ISSUER",
     "OPENAI_COMPATIBLE_PLATFORM",
+    "PROTOCOL_VERSION",
     "TLSCertificateCredential",
     "create_artifact",
     "create_signer",
