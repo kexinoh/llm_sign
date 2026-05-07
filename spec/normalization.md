@@ -22,9 +22,10 @@ to the preceding block. The resulting chain provides issuer authentication,
 payload integrity, and ordering integrity for the signed statements.
 
 Issuer public keys are resolved by a verifier-defined key policy. The baseline
-key policy reads the provider's public key from the TLS certificate that the
-provider ships alongside its signed response (see `docs/artifact.md`); no
-certification path validation is performed by this specification.
+key policy authenticates the provider certificate the response envelope
+carries using the standard TLS / X.509 server-certificate validation
+procedure (see `spec/provider-certificate-binding.md`); the transcript
+signature is then verified under the leaf public key of that certificate.
 
 ## 2. Conventions and Definitions
 
@@ -104,20 +105,26 @@ resolve this tuple under its key policy to exactly one trusted public key before
 accepting a signature. If key resolution returns zero keys, multiple keys, an
 expired key, or a key outside the verifier policy, verification MUST fail.
 
-The baseline key policy reads the provider's public key from the TLS
-certificate the provider ships alongside its signed response (for
-example `llm_sign.certificate_chain` in an OpenAI-compatible envelope)
-and does not perform any certification path validation. Transport TLS
-authentication of an intermediary connection alone MUST NOT be treated
-as transcript signature verification; the transcript block still has to
-be signed by the private key corresponding to the public key extracted
-from that certificate.
+The baseline key policy obtains the provider's public key from the TLS
+certificate the provider ships alongside its signed response (see
+`docs/artifact.md` and
+[`spec/provider-certificate-binding.md`](provider-certificate-binding.md)).
+That certificate MUST be authenticated the same way an HTTPS client
+authenticates a server certificate: standard X.509 chain validation
+against a set of trust anchors, with the expected host matched against
+the leaf's subjectAltName. No new PKI is introduced.
 
-When a transcript is delivered through a relay or gateway, the
-client-visible TLS connection authenticates only that relay hop. The
-signed `key_id` field MUST be an SPKI-SHA256 binding to the provider
-certificate the response carries, so that a relay cannot swap the
-certificate without causing verification to fail.
+Transport TLS authentication of an intermediary connection alone MUST
+NOT be treated as transcript signature verification. When a transcript
+is delivered through a relay or gateway the client-visible TLS
+connection authenticates only that relay hop; the signed block must
+still be independently verified by the public key extracted from the
+authenticated provider certificate.
+
+The signed `key_id` MUST be an SPKI-SHA256 binding to the leaf public
+key of that provider certificate, so that a verifier can detect any
+substitution between the authenticated certificate and the key that
+actually produced the signature.
 
 ## 5. Primitive Encoding
 
@@ -515,13 +522,16 @@ The signed block authenticates only the fields covered by `encode_block`.
 Container metadata and cached digests are not signed by the transcript
 signature unless a profile or extension explicitly commits to them.
 
-In relay deployments, the provider's TLS certificate carried by the
-response envelope is the client's only channel for obtaining the
-provider's public key. A relay cannot forge a valid signature without
-the provider's private key, and cannot substitute a different
-certificate either: the signed `key_id` is an SPKI-SHA256 binding to
-the leaf certificate public key, so any replacement certificate whose
-public key does not match `key_id` fails verification.
+In relay deployments the provider's TLS certificate chain carried in
+the response envelope is the verifier's channel for obtaining the
+provider's signing public key. The verifier MUST authenticate that
+chain under the TLS / X.509 rules of the trust anchors it is
+configured with, and MUST check that the validated leaf's
+SubjectPublicKeyInfo hashes to the signed `key_id`. A relay cannot
+forge a valid signature because it does not hold the provider's
+private key, and cannot swap the embedded chain for one it controls
+unless it also controls the DNS name bound to the signed `issuer`
+under those trust anchors.
 
 Profile design is security-critical. Omitting model-visible material from a
 profile can cause different interactions to share the same canonical payload.
@@ -561,8 +571,9 @@ this specification and by the profile.
 
 A baseline version 1 verifier conforms only if it supports
 `sha256-ed25519-v1`, `provider_received_input`, `provider_output`, the baseline
-chain rules, and a key policy that reads the signer's public key from the
-provider TLS certificate the response envelope carries.
+chain rules, and a key policy that obtains the signer's public key from the
+response-embedded provider certificate under the binding in
+[`spec/provider-certificate-binding.md`](provider-certificate-binding.md).
 
 ## 20. References
 

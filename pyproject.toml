@@ -45,6 +45,12 @@ dependencies = [
 openai = [
   "openai>=1",
 ]
+certifi = [
+  # Soft fallback trust store for systems where ssl.get_default_verify_paths()
+  # returns no usable CA bundle (e.g. minimal containers). llm_sign detects
+  # and uses certifi automatically when installed.
+  "certifi",
+]
 
 [project.urls]
 Homepage = "https://github.com/kexinoh/llm_sign"

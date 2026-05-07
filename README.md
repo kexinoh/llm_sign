@@ -16,32 +16,33 @@ with on the wire — even when a relay sits between them.
   official vLLM integration.
 - Transport-agnostic. The signature lives in the response JSON, so it
   survives HTTPS relays, proxies, and gateways.
+- No new PKI. The client authenticates the provider certificate using
+  the same TLS / X.509 rules a browser uses against an HTTPS server.
 
-## Threat model and trust
+## Threat model
 
-The threat is a middleman / relay that sits between the client and the
-real LLM provider (for example a paid gateway or an API aggregator).
-The client's own HTTPS session only authenticates the **relay**, not
-the provider, so a plain TLS connection cannot tell the client whether
-the request actually reached the provider or whether the response was
-tampered with along the way.
+The threat is a middleman / relay between the client and the real LLM
+provider (for example a paid gateway or an API aggregator). The
+client's own HTTPS session authenticates only the relay, so plain TLS
+alone cannot tell the client whether the request actually reached the
+provider or whether the response was tampered with on the way back.
 
-`llm_sign` closes this gap by having the provider sign every turn with
-the private key that terminates its own TLS endpoint, and **embed its
-TLS certificate in the signed response** at
-`response["llm_sign"]["certificate_chain"]`. The client reads the
-provider's public key straight out of that certificate and uses it to
-verify the artifact.
+`llm_sign` closes this gap by having the provider sign every turn
+with its TLS private key, and ship its TLS certificate chain inside
+the signed response at `response["llm_sign"]["certificate_chain"]`.
+The client validates that chain the same way an HTTPS client
+validates a server certificate — standard X.509 path validation
+against the system TLS trust store, with SAN name matching — and then
+verifies the transcript against the validated leaf's public key.
 
 - The relay cannot forge a signature because it does not hold the
-  provider's private key.
+  provider's TLS private key.
 - The relay cannot substitute a different certificate either: the
-  signed `key_id` field is an SPKI hash of the public key that signed
-  the blocks, so any replacement certificate whose public key does not
-  match that hash fails verification.
+  signed `key_id` field is an SPKI-SHA256 of the signer's public key,
+  and the client cross-checks it against the validated leaf's SPKI.
 
-There is **no PKI / CA trust chain** in `llm_sign`. The certificate is
-used purely as a transport for the provider's public key.
+The full specification of this binding lives in
+[`spec/provider-certificate-binding.md`](spec/provider-certificate-binding.md).
 
 ## Install
 
@@ -49,19 +50,10 @@ used purely as a transport for the provider's public key.
 pip install llm-sign
 ```
 
-> The PyPI distribution is `llm-sign` (hyphen), the Python import name
-> is `llm_sign` (underscore) — matching the usual Python packaging
-> convention (e.g. `scikit-learn` / `sklearn`, `typing-extensions` /
-> `typing_extensions`).
-
-```python
-import llm_sign
-```
-
 ## Quickstart (client): verify a signed response
 
-The provider ships its certificate inside the response. The client has
-nothing to configure:
+The provider ships its certificate inside the response. The default
+verifier authenticates it against the system TLS trust store:
 
 ```python
 import json
@@ -77,11 +69,29 @@ else:
     print("rejected :", result.errors)
 ```
 
-**What this actually checks.** The signed payload covers both the
-request (what you asked) and the response (what the model said).
-Mutating a single character of either side — the user prompt, the
-assistant content, the model name, the temperature — or swapping the
-embedded provider certificate flips `valid` to `False`.
+**What this actually checks.** The client runs the standard TLS /
+X.509 server-certificate validation algorithm on the embedded chain
+(system trust store + SAN match for the expected host), cross-checks
+the signed `key_id` against the validated leaf's SPKI, and then
+verifies the transcript signature. Mutating the request, the
+response, or the transcript flips `valid` to `False`; swapping the
+embedded chain for one not rooted in the trust store fails chain
+validation; swapping the leaf for one under a different key fails the
+`key_id` match.
+
+### Private / self-signed providers
+
+If the provider does not use a Web PKI certificate, pass an explicit
+trust anchor set or opt into trust-on-first-use:
+
+```python
+# Private CA
+from llm_sign.client import verify_openai_response
+result = verify_openai_response(response, trust_anchors=my_root_certs)
+
+# Self-signed / local dev (trust embedded cert as-is)
+result = verify_openai_response(response, verify_tls=False)
+```
 
 ### Works with older providers too
 
@@ -96,22 +106,14 @@ report.host_name       # provider host name, if signed
 report.valid           # True / False / None (None = no signature to check)
 ```
 
-### Pinning a known provider key (TOFU)
+### Pinning a known provider key
 
-If you want to lock the client to a specific provider identity across
-sessions — i.e. not trust whatever certificate a future response might
-carry — pin the public key the first time you see it:
+If you have the provider's public key out of band and want to skip
+certificate handling entirely:
 
 ```python
-from llm_sign.client import (
-    public_key_from_openai_response,
-    verify_openai_response_with_public_key,
-)
-
-pinned = public_key_from_openai_response(first_response)  # extract once
-# ... store pinned ...
-
-result = verify_openai_response_with_public_key(later_response, public_key=pinned)
+from llm_sign.client import verify_openai_response_with_public_key
+result = verify_openai_response_with_public_key(response, public_key=pinned)
 ```
 
 ## Quickstart (provider): sign a response
@@ -134,7 +136,7 @@ artifact = llm_sign.server.sign_openai_chat_turn(
     signer=signer,
 )
 
-# Attach the artifact plus the provider certificate to the HTTP response:
+# Attach the artifact plus the provider certificate chain to the HTTP response:
 llm_sign.server.attach_signed_artifact_to_openai_response(
     response_dict,
     artifact=artifact,
@@ -143,8 +145,11 @@ llm_sign.server.attach_signed_artifact_to_openai_response(
 ```
 
 The issuer (provider identity claimed in the signature) is derived
-from your certificate's SAN/CN, so it matches your TLS server name
-automatically. RSA, P-256 ECDSA, and Ed25519 keys are all supported.
+from your certificate's SAN/CN so it matches your TLS server name
+automatically. RSA and P-256 ECDSA certificates verify under the
+system Web PKI out of the box; Ed25519 certificates are supported by
+the signing suites but currently require a private trust anchor set
+because the public Web PKI does not yet accept them.
 
 ## Using llm_sign with vLLM
 
@@ -170,7 +175,8 @@ client breakage.
 ## Command-line verifier
 
 For offline / audit use, the CLI takes a pinned public key (or a PEM
-certificate whose public key is used):
+certificate whose public key is used). It does not run the TLS chain
+check — pass in the key you already trust:
 
 ```sh
 llm-sign-verify artifact.json \
@@ -190,15 +196,17 @@ Every artifact carries a tiny `protocol` block:
 ```
 
 Readers refuse artifacts whose `min_reader_version` is higher than
-what they understand, with a clear "please upgrade llm_sign"
-message. The protocol integer is explicitly **decoupled** from the
-Python package version: bug fixes, refactors, and new helpers never
-bump it; only wire-format changes do.
+what they understand, with a clear "please upgrade llm_sign" message.
+The protocol integer is explicitly **decoupled** from the Python
+package version: bug fixes, refactors, and new helpers never bump it;
+only wire-format changes do.
 
 ## Learn more
 
 - [spec/normalization.md](spec/normalization.md) — canonical JSON and
   digest construction
+- [spec/provider-certificate-binding.md](spec/provider-certificate-binding.md)
+  — certificate authentication and key binding
 - [docs/artifact.md](docs/artifact.md) — signed artifact envelope
 - [example/](example/) — runnable scripts, including offline verify
   and tamper-detection demos

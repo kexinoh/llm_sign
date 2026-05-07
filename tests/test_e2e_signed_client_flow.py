@@ -3,9 +3,9 @@ import datetime as dt
 import unittest
 
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from llm_sign import Ed25519KeyPair, PayloadState, TranscriptSigner
 from llm_sign.blocks import PROVIDER_OUTPUT, PROVIDER_RECEIVED_INPUT, TOOL_RESULT
 from llm_sign.client import (
@@ -568,9 +568,40 @@ class E2ESignedClientFlowTests(unittest.TestCase):
         )
 
     @unittest.skipIf(OpenAI is None, "openai SDK is not installed")
-    def test_openai_sdk_signature_report_reports_unknown_without_pinned_key(self):
+    def test_openai_sdk_signature_report_verifies_embedded_certificate_via_ca(self):
+        """verify_openai_response_signature validates the response-embedded cert under a CA."""
+
+        request = build_chat_request()
+        supplier_key, supplier_cert, root_cert = _supplier_server_cert(ISSUER)
+
+        with SignedChatHttpServer(
+            response_mode="openai-compatible",
+            signer=_supplier_signer(supplier_key, supplier_cert),
+            certificate_chain=[supplier_cert],
+        ) as server:
+            openai_client = OpenAI(api_key="test-key", base_url=server.openai_base_url)
+            completion = openai_client.chat.completions.create(**request)
+            report = verify_openai_response_signature(
+                completion,
+                trust_anchors=[root_cert],
+            )
+
+        self.assertEqual(
+            openai_response_signature_summary(report),
+            {
+                "has_signature": True,
+                "host_name": ISSUER,
+                "valid": True,
+            },
+        )
+
+    @unittest.skipIf(OpenAI is None, "openai SDK is not installed")
+    def test_openai_sdk_signature_report_marks_missing_certificate_chain_invalid(self):
+        """A signed response without an embedded certificate cannot be verified."""
+
         request = build_chat_request()
 
+        # No certificate_chain, no pinned public key.
         with SignedChatHttpServer(self.keys, response_mode="openai-compatible") as server:
             openai_client = OpenAI(api_key="test-key", base_url=server.openai_base_url)
             completion = openai_client.chat.completions.create(**request)
@@ -579,13 +610,13 @@ class E2ESignedClientFlowTests(unittest.TestCase):
         summary = openai_response_signature_summary(report)
         self.assertTrue(summary["has_signature"])
         self.assertEqual(summary["host_name"], ISSUER)
-        self.assertIsNone(summary["valid"])
+        self.assertFalse(summary["valid"])
 
     def test_relay_response_with_embedded_provider_certificate_verifies_end_to_end(self):
-        """Provider ships its TLS cert in the first response; client verifies against it."""
+        """Provider ships its TLS cert in the first response; client verifies it under CA."""
 
         request = build_chat_request()
-        supplier_key, supplier_cert = _supplier_server_cert(ISSUER)
+        supplier_key, supplier_cert, root_cert = _supplier_server_cert(ISSUER)
 
         with SignedChatHttpServer(
             response_mode="openai-compatible",
@@ -595,6 +626,7 @@ class E2ESignedClientFlowTests(unittest.TestCase):
             with JsonProxyHttpServer(target_base_url=supplier.openai_base_url) as relay:
                 client = EmbeddedCertificateSignedChatClient(
                     endpoint=relay.chat_completions_url,
+                    trust_anchors=[root_cert],
                 )
                 completion = client.create_chat_completion(request)
 
@@ -609,11 +641,11 @@ class E2ESignedClientFlowTests(unittest.TestCase):
         )
 
     def test_relay_swapping_embedded_certificate_breaks_verification(self):
-        """A relay that replaces the provider cert cannot forge a valid signature."""
+        """A relay that replaces the provider cert with one under another CA is rejected."""
 
         request = build_chat_request()
-        supplier_key, supplier_cert = _supplier_server_cert(ISSUER)
-        _, evil_cert = _supplier_server_cert(ISSUER)
+        supplier_key, supplier_cert, root_cert = _supplier_server_cert(ISSUER)
+        _, evil_cert, evil_root = _supplier_server_cert(ISSUER)
 
         with SignedChatHttpServer(
             response_mode="openai-compatible",
@@ -628,21 +660,16 @@ class E2ESignedClientFlowTests(unittest.TestCase):
             ) as relay:
                 client = EmbeddedCertificateSignedChatClient(
                     endpoint=relay.chat_completions_url,
+                    trust_anchors=[root_cert],
                 )
-                completion = client.create_chat_completion(request)
-
-        self.assertFalse(completion.verification.valid)
-        self.assertTrue(completion.verification.errors)
-        self.assertTrue(
-            completion.verification.errors[0].startswith("seq 0:"),
-            completion.verification.errors,
-        )
+                with self.assertRaises(Exception):
+                    client.create_chat_completion(request)
 
     def test_relay_dropping_embedded_certificate_raises_on_verify(self):
         """A response that lost its provider cert cannot be verified."""
 
         request = build_chat_request()
-        supplier_key, supplier_cert = _supplier_server_cert(ISSUER)
+        supplier_key, supplier_cert, root_cert = _supplier_server_cert(ISSUER)
 
         with SignedChatHttpServer(
             response_mode="openai-compatible",
@@ -655,9 +682,30 @@ class E2ESignedClientFlowTests(unittest.TestCase):
             ) as relay:
                 client = EmbeddedCertificateSignedChatClient(
                     endpoint=relay.chat_completions_url,
+                    trust_anchors=[root_cert],
                 )
                 with self.assertRaisesRegex(ValueError, "certificate_chain"):
                     client.create_chat_completion(request)
+
+    def test_self_signed_embedded_certificate_works_when_tls_verification_disabled(self):
+        """Opt-in TOFU flow for self-signed providers / local dev."""
+
+        request = build_chat_request()
+        supplier_key, supplier_cert, _root_cert = _supplier_server_cert(ISSUER)
+
+        with SignedChatHttpServer(
+            response_mode="openai-compatible",
+            signer=_supplier_signer(supplier_key, supplier_cert),
+            certificate_chain=[supplier_cert],
+        ) as supplier:
+            with JsonProxyHttpServer(target_base_url=supplier.openai_base_url) as relay:
+                client = EmbeddedCertificateSignedChatClient(
+                    endpoint=relay.chat_completions_url,
+                    verify_tls=False,
+                )
+                completion = client.create_chat_completion(request)
+
+        self.assertTrue(completion.verification.valid, completion.verification.errors)
 
     def _client(self, server: SignedChatHttpServer) -> SignedChatClient:
         return SignedChatClient(
@@ -759,17 +807,11 @@ def _chain_index_for_seq(artifact, seq):
     raise AssertionError(f"missing chain block for seq {seq}")
 
 
-def _supplier_server_cert(dns_name):
-    """Self-signed Ed25519 cert used purely as a public-key container.
-
-    There is no CA in this project. The certificate is how the provider
-    publishes its signing public key to the client; trust is established
-    by the fact that the relay cannot forge a signature under the
-    provider's private key.
-    """
-    key = Ed25519PrivateKey.generate()
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, dns_name)])
+def _root_ca(common_name="llm-sign test root"):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
     now = dt.datetime.now(dt.timezone.utc)
+    ski = x509.SubjectKeyIdentifier.from_public_key(key.public_key())
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -777,11 +819,73 @@ def _supplier_server_cert(dns_name):
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - dt.timedelta(days=1))
-        .not_valid_after(now + dt.timedelta(days=30))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
-        .sign(private_key=key, algorithm=None)
+        .not_valid_after(now + dt.timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                key_encipherment=False,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(ski, critical=False)
+        .sign(key, hashes.SHA256())
     )
     return key, cert
+
+
+def _supplier_server_cert(dns_name, root_key=None, root_cert=None):
+    """Standard RSA TLS server certificate issued under a test root.
+
+    The test root is treated as a trust anchor by the client (passed
+    explicitly as ``trust_anchors``). This mirrors the real deployment
+    path where the provider uses a normal Web PKI certificate and the
+    client validates it against the system TLS trust store.
+    """
+    if root_key is None or root_cert is None:
+        root_key, root_cert = _root_ca()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, dns_name)])
+    now = dt.datetime.now(dt.timezone.utc)
+    ski = x509.SubjectKeyIdentifier.from_public_key(key.public_key())
+    aki = x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key())
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(root_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(ski, critical=False)
+        .add_extension(aki, critical=False)
+        .sign(root_key, hashes.SHA256())
+    )
+    return key, cert, root_cert
 
 
 def _supplier_signer(supplier_key, supplier_cert):

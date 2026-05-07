@@ -3,31 +3,42 @@
 Trust model
 -----------
 
-``llm_sign`` does not ship a PKI / CA trust model. The threat model is
-middleman / relay tampering: a client talks to a relay over HTTPS, and
-the relay talks to the real provider. The client's TLS session only
-authenticates the relay, so the client cannot learn the provider's
-public key from its own TLS handshake.
+The threat ``llm_sign`` targets is middleman / relay tampering: a client
+talks to a relay over HTTPS, and the relay forwards to the real
+provider. The client's TLS session only authenticates the relay, so
+the client cannot learn the provider's signing public key from its own
+TLS handshake.
 
-By convention the provider returns its TLS certificate alongside the
-signed transcript, in ``llm_sign.certificate_chain``. The client reads
-the provider's public key out of that certificate (no CA / path
-validation is performed) and uses it to verify the transcript. Tampering
-by the relay is detected because any mutation of the request, response,
-or transcript would invalidate the signature that was produced with the
-provider's private key.
+By convention the provider ships its TLS certificate alongside the
+signed transcript, in ``response["llm_sign"]["certificate_chain"]``.
+The client authenticates that certificate the same way an HTTPS client
+authenticates a server certificate: standard X.509 chain validation
+against the system TLS trust store, with the expected host name
+matched against the leaf's subjectAltName. This is not a new PKI, it
+is the same Web PKI the client would have used if it were talking
+directly to the provider over HTTPS. ``llm_sign.tls_verify`` wraps
+``cryptography.x509.verification`` for this step.
 
-A client that already knows the provider's public key can pin it
-directly via :func:`verify_with_public_key` /
-:func:`verify_openai_response_with_public_key`; this is equivalent to
-trusting-on-first-use the certificate that shipped with the first
-response.
+After the chain is trusted, the signed ``key_id`` field (an SPKI-SHA256
+of the signer's public key) is cross-checked against the validated
+leaf's SPKI, and the transcript signature is verified with that key.
+A relay cannot forge a signature because it does not hold the
+provider's private key, and cannot swap the embedded chain for one
+rooted in the same system trust store unless it also controls the
+DNS name claimed by the artifact (which it does not).
+
+Callers that do not want to rely on the Web PKI — for example when the
+provider uses a private TLS hierarchy or a self-signed certificate —
+can pass explicit ``trust_anchors``, disable chain validation with
+``verify_tls=False`` (trust-on-first-use against the embedded
+certificate), or pin a public key directly via
+:func:`verify_openai_response_with_public_key`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from cryptography import x509
 
@@ -35,6 +46,11 @@ from llm_sign.core.blocks import ChainVerification
 from llm_sign.core.crypto import infer_suite_for_public_key
 from llm_sign.keys.ed25519 import StaticKeyPolicy, spki_sha256_key_id
 from llm_sign.keys.tls import certificate_key_id, load_pem_certificates
+from llm_sign.tls_verify import (
+    CertificateTrustError,
+    load_system_trust_anchors,
+    verify_certificate_chain,
+)
 from llm_sign.verifier import load_signed_blocks, verify_artifact
 
 
@@ -150,12 +166,12 @@ def certificate_chain_from_openai_response(
     The provider is expected to attach its TLS certificate chain at
     ``response["llm_sign"]["certificate_chain"]`` (leaf first). This is
     the channel the client uses to learn the provider's public key when
-    the TLS session only authenticates an intermediary relay.
+    the underlying TLS session only authenticates an intermediary relay.
 
-    The chain is parsed but **not** validated against any trust anchor;
-    ``llm_sign`` treats the certificate purely as a container for the
-    signing public key. If ``required`` is ``False`` and the field is
-    absent, ``None`` is returned.
+    The chain is only **parsed** here; the caller decides how to
+    authenticate it (TLS chain validation, trust-on-first-use, etc).
+    If ``required`` is ``False`` and the field is absent, ``None`` is
+    returned.
     """
 
     llm_sign = response.get("llm_sign")
@@ -186,23 +202,62 @@ def certificate_chain_from_openai_response(
     return certificates
 
 
-def public_key_from_openai_response(response: Mapping[str, Any]) -> Any:
+def public_key_from_openai_response(
+    response: Mapping[str, Any],
+    *,
+    expected_host: Optional[str] = None,
+    trust_anchors: Optional[Sequence[x509.Certificate]] = None,
+    verify_tls: bool = True,
+) -> Any:
     """Return the provider's signing public key from an OpenAI response.
 
-    Reads ``llm_sign.certificate_chain[0]`` (the provider's leaf
-    certificate) and returns its embedded public key. No CA / path
-    validation is performed: the certificate is used only as a transport
-    for the public key the transcript was signed with.
+    Reads ``llm_sign.certificate_chain`` (leaf first). When
+    ``verify_tls`` is true (the default), the chain is validated as a
+    standard TLS server certificate chain — same procedure as an HTTPS
+    client handshake — against ``trust_anchors`` (or the system TLS
+    trust store) with ``expected_host`` matched against the leaf's
+    subjectAltName.
+
+    ``expected_host`` defaults to the ``issuer`` value on the signed
+    artifact's first block (which the provider binds to its TLS server
+    name); callers can override it to pin a different identity.
+
+    When ``verify_tls`` is ``False`` the chain is parsed but not
+    authenticated. This is useful for self-signed providers and local
+    development; it reduces the client to trust-on-first-use of the
+    embedded certificate.
+
+    Raises :class:`CertificateTrustError` on chain validation failure.
     """
 
     chain = certificate_chain_from_openai_response(response)
     assert chain is not None  # required=True above
-    return chain[0].public_key()
+
+    if not verify_tls:
+        return chain[0].public_key()
+
+    host = expected_host
+    if host is None:
+        artifact = _optional_artifact_from_openai_response(response)
+        if artifact is not None:
+            host = host_name_from_artifact(artifact)
+    if host is None:
+        raise CertificateTrustError(
+            "expected_host could not be inferred; pass expected_host explicitly"
+        )
+    return verify_certificate_chain(
+        chain,
+        expected_host=host,
+        trust_anchors=trust_anchors,
+    ).public_key()
 
 
 def verify_openai_response(
     response: Mapping[str, Any],
     *,
+    expected_host: Optional[str] = None,
+    trust_anchors: Optional[Sequence[x509.Certificate]] = None,
+    verify_tls: bool = True,
     issuer: Optional[str] = None,
     key_id: Optional[str] = None,
     suite_id: Optional[str] = None,
@@ -211,18 +266,35 @@ def verify_openai_response(
 ) -> ChainVerification:
     """Verify an OpenAI response using the provider certificate it carries.
 
-    The signing public key is read from the provider certificate that the
-    response embeds at ``llm_sign.certificate_chain[0]``. This is the
-    standard client path: no PEM files, no TLS trust store, no PKI — the
-    relay cannot forge a signature because it does not have the
-    provider's private key, and substituting the certificate would cause
-    the signed ``key_id`` to no longer match the leaf public key.
+    The provider's TLS certificate chain is read from
+    ``response["llm_sign"]["certificate_chain"]`` and, by default,
+    validated against the system TLS trust store exactly as an HTTPS
+    client would validate a server certificate. The transcript is then
+    verified with the public key embedded in the trusted leaf.
 
-    Callers that want to pin a specific issuer identity across sessions
-    should use :func:`verify_openai_response_with_public_key` instead.
+    Parameters
+    ----------
+    expected_host:
+        Host name the leaf certificate must match. Defaults to the
+        ``issuer`` value on the first signed block.
+    trust_anchors:
+        Optional list of PEM ``x509.Certificate`` objects. When
+        ``None``, the system TLS trust store is used.
+    verify_tls:
+        When ``False``, the chain is parsed but not validated (trust
+        the embedded certificate on its own). Use this only for
+        self-signed providers or local development.
+
+    Callers that want to skip certificate handling entirely and pin a
+    known public key should use :func:`verify_openai_response_with_public_key`.
     """
 
-    public_key = public_key_from_openai_response(response)
+    public_key = public_key_from_openai_response(
+        response,
+        expected_host=expected_host,
+        trust_anchors=trust_anchors,
+        verify_tls=verify_tls,
+    )
     return verify_openai_response_with_public_key(
         response,
         public_key=public_key,
@@ -284,6 +356,9 @@ def verify_openai_response_signature(
     response: Any,
     *,
     public_key: Optional[Any] = None,
+    expected_host: Optional[str] = None,
+    trust_anchors: Optional[Sequence[x509.Certificate]] = None,
+    verify_tls: bool = True,
     issuer: Optional[str] = None,
     key_id: Optional[str] = None,
     suite_id: Optional[str] = None,
@@ -295,10 +370,12 @@ def verify_openai_response_signature(
     - Unsigned responses yield ``has_signature=False, valid=None``.
     - Signed responses are verified against ``public_key`` when pinned,
       otherwise against the provider certificate embedded in
-      ``llm_sign.certificate_chain``.
-    - If the signature can neither be pinned nor be read from an
-      embedded provider certificate, ``valid`` is ``False`` (the
-      response claims to be signed but carries nothing to verify against).
+      ``llm_sign.certificate_chain``. By default the embedded chain is
+      validated against the system TLS trust store (see
+      :func:`verify_openai_response`); pass ``trust_anchors`` or
+      ``verify_tls=False`` to override.
+    - Any failure — untrusted chain, bad signature, missing certificate
+      — yields ``valid=False``.
     """
 
     response_data = openai_response_to_dict(response)
@@ -315,7 +392,12 @@ def verify_openai_response_signature(
     resolved_public_key = public_key
     if resolved_public_key is None:
         try:
-            resolved_public_key = public_key_from_openai_response(response_data)
+            resolved_public_key = public_key_from_openai_response(
+                response_data,
+                expected_host=expected_host,
+                trust_anchors=trust_anchors,
+                verify_tls=verify_tls,
+            )
         except Exception:
             return OpenAIResponseSignatureReport(
                 has_signature=True,
@@ -417,6 +499,7 @@ def _to_json_value(value: Any) -> Any:
 
 
 __all__ = [
+    "CertificateTrustError",
     "OpenAIResponseSignatureReport",
     "StaticKeyPolicy",
     "artifact_from_openai_response",
@@ -425,6 +508,7 @@ __all__ = [
     "host_name_from_artifact",
     "load_pem_certificates",
     "load_signed_blocks",
+    "load_system_trust_anchors",
     "openai_response_signature_summary",
     "openai_response_to_dict",
     "public_key_from_openai_response",

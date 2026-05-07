@@ -103,16 +103,26 @@ class SignedChatClient:
 class EmbeddedCertificateSignedChatClient:
     """Client that reads the provider public key from the response itself.
 
-    The response is expected to carry the provider's TLS certificate at
-    ``llm_sign.certificate_chain`` (leaf first). The client extracts the
-    public key from the leaf certificate and uses it to verify the
-    signed artifact. No CA / PKI validation is performed: trust in the
-    certificate comes from the fact that a relay cannot forge a
-    signature with the provider's private key.
+    The response carries the provider's TLS certificate chain at
+    ``llm_sign.certificate_chain`` (leaf first). The client authenticates
+    that chain the same way an HTTPS client would — standard TLS / X.509
+    validation against a set of trust anchors, with SAN name matching —
+    and then verifies the signed artifact against the validated leaf's
+    public key.
     """
 
-    def __init__(self, *, endpoint: str) -> None:
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        trust_anchors=None,
+        expected_host=None,
+        verify_tls: bool = True,
+    ) -> None:
         self.endpoint = endpoint
+        self.trust_anchors = trust_anchors
+        self.expected_host = expected_host
+        self.verify_tls = verify_tls
         self._payloads = {}
 
     def create_chat_completion(self, request: Mapping[str, Any]) -> VerifiedChatCompletion:
@@ -120,7 +130,12 @@ class EmbeddedCertificateSignedChatClient:
         artifact = artifact_from_openai_response(response)
         signed_response = artifact["turns"][-1]["response"]
         payloads = self._payloads_for_artifact(artifact, request, signed_response)
-        public_key = public_key_from_openai_response(response)
+        public_key = public_key_from_openai_response(
+            response,
+            expected_host=self.expected_host,
+            trust_anchors=self.trust_anchors,
+            verify_tls=self.verify_tls,
+        )
         verification = verify_openai_response_with_public_key(
             response,
             public_key=public_key,
