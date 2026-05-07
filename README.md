@@ -59,6 +59,32 @@ the default client configuration.
 The full threat model and wire-format specification live in
 [`spec/provider-certificate-binding.md`](spec/provider-certificate-binding.md).
 
+### This threat is not hypothetical
+
+Recent work measures, in the wild, exactly the relay-layer misbehavior
+that `llm_sign` is designed to defend against:
+
+- **"Real Money, Fake Models: Deceptive Model Claims in Shadow APIs"**
+  ([arXiv:2603.01919](https://arxiv.org/abs/2603.01919) ·
+  [alphaXiv](https://www.alphaxiv.org/overview/2603.01919)) —
+  documents third-party "shadow API" resellers that charge for a
+  premium model while silently routing traffic to a cheaper or
+  different model. This is the **model-substitution** attack listed
+  above, observed on real commercial endpoints.
+- **"Your Agent Is Mine: Measuring Malicious Intermediary Attacks on
+  the LLM Supply Chain"**
+  ([arXiv:2604.08407](https://arxiv.org/abs/2604.08407) ·
+  [alphaXiv](https://www.alphaxiv.org/abs/2604.08407)) —
+  measures malicious intermediaries across the LLM supply chain that
+  modify, redirect, or hijack agent traffic between the client and
+  the true provider. This is the **relay-tampering / response-forgery**
+  attack class.
+
+Both papers establish that a plain `client ──HTTPS──▶ relay ──HTTPS──▶
+provider` topology provides the client with **no** cryptographic
+evidence about which model actually answered, or whether the answer was
+modified en route. `llm_sign` provides exactly that missing evidence.
+
 ---
 
 
