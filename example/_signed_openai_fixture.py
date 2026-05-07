@@ -1,4 +1,9 @@
-"""Static signed OpenAI-compatible response used by examples."""
+"""Static signed OpenAI-compatible response used by examples.
+
+The fixture pairs a signed artifact with the Ed25519 public key that
+signs it. Verification in the examples is performed by pinning that
+public key directly; ``llm_sign`` does not use any CA / PKI trust chain.
+"""
 
 from __future__ import annotations
 
@@ -6,28 +11,21 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from cryptography.hazmat.primitives import serialization
 
-SUPPLIER_CERTIFICATE_CHAIN_PEM = [
-    """-----BEGIN CERTIFICATE-----
-MIIBOzCB7qADAgECAgFlMAUGAytlcDAgMR4wHAYDVQQDDBVsbG0tc2lnbiBleGFt
-cGxlIHJvb3QwHhcNMjQwMTAxMDAwMDAwWhcNMzQwMTAxMDAwMDAwWjAbMRkwFwYD
-VQQDDBBwcm92aWRlci5leGFtcGxlMCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vA
-mWfk1jCbpQ1fHdyGZBJVMbijUjBQMAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQD
-AgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBsGA1UdEQQUMBKCEHByb3ZpZGVyLmV4
-YW1wbGUwBQYDK2VwA0EA5teNZ/Y9N1SwCipDPZtuX5k5shcavFAKj792ATEVK8VI
-6+DpcNr7iaU1PDpBX5DhXC76fVVMJOZA5v7PCpX3AQ==
------END CERTIFICATE-----
-""",
-    """-----BEGIN CERTIFICATE-----
-MIIBFDCBx6ADAgECAgFkMAUGAytlcDAgMR4wHAYDVQQDDBVsbG0tc2lnbiBleGFt
-cGxlIHJvb3QwHhcNMjQwMTAxMDAwMDAwWhcNMzQwMTAxMDAwMDAwWjAgMR4wHAYD
-VQQDDBVsbG0tc2lnbiBleGFtcGxlIHJvb3QwKjAFBgMrZXADIQAprLrhQbzK8LIu
-GpTTTQvHNh5SbQv+EsiXlLyTIpZt16MmMCQwEgYDVR0TAQH/BAgwBgEB/wIBATAO
-BgNVHQ8BAf8EBAMCAYYwBQYDK2VwA0EASTWiW1qdgHnrat5jfrwU6U07iGXR0xsk
-zQ192jjJPpyThrJrBbImEu/A7M/SybkRLAx0u4VtJGjA3uIQS3m6Cg==
------END CERTIFICATE-----
-""",
-]
+
+# Ed25519 public key that signs the bundled artifact below. Clients
+# "pin" it out of band exactly as they would pin a provider's
+# TLS-served public key in a real deployment.
+SUPPLIER_PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=
+-----END PUBLIC KEY-----
+"""
+
+
+def load_supplier_public_key() -> Any:
+    return serialization.load_pem_public_key(SUPPLIER_PUBLIC_KEY_PEM.encode("ascii"))
+
 
 SIGNED_CHAT_COMPLETION = json.loads(
     """
@@ -119,8 +117,6 @@ SIGNED_CHAT_COMPLETION = json.loads(
 }
 """
 )
-
-SIGNED_CHAT_COMPLETION["llm_sign"]["certificate_chain"] = SUPPLIER_CERTIFICATE_CHAIN_PEM
 
 
 def assistant_message(response: Mapping[str, Any]) -> str:

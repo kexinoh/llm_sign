@@ -1,4 +1,8 @@
-"""Verify a signed OpenAI-compatible chat completion without network access."""
+"""Verify a signed OpenAI-compatible chat completion without network access.
+
+The client pins the provider's transcript-signing public key directly.
+There is no CA / PKI validation: trust is in the pinned key.
+"""
 
 from __future__ import annotations
 
@@ -8,17 +12,15 @@ import json
 import llm_sign
 #---------
 
-from _signed_openai_fixture import SIGNED_CHAT_COMPLETION
+from _signed_openai_fixture import SIGNED_CHAT_COMPLETION, load_supplier_public_key
 
 
 def main() -> int:
-    #--------- llm_sign verification core: parse supplier chain and report signature status.
-    certificate_chain = llm_sign.client.certificate_chain_from_openai_response(
-        SIGNED_CHAT_COMPLETION
-    )
+    #--------- llm_sign verification core: verify with the pinned supplier public key.
+    public_key = load_supplier_public_key()
     report = llm_sign.client.verify_openai_response_signature(
         SIGNED_CHAT_COMPLETION,
-        trust_anchors=[certificate_chain[-1]],
+        public_key=public_key,
     )
     print(
         json.dumps(

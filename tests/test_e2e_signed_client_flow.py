@@ -1,21 +1,15 @@
 from copy import deepcopy
-import datetime as dt
 import unittest
 
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-from llm_sign import Ed25519KeyPair, PayloadState, TranscriptSigner
+from llm_sign import Ed25519KeyPair, PayloadState
 from llm_sign.blocks import PROVIDER_OUTPUT, PROVIDER_RECEIVED_INPUT, TOOL_RESULT
 from llm_sign.client import (
     openai_response_signature_summary,
     openai_response_to_dict,
     verify_openai_response_signature,
 )
-from llm_sign.keys.x509 import certificate_key_id
 
-from tests.e2e_support.client import CertificateChainSignedChatClient, SignedChatClient
+from tests.e2e_support.client import SignedChatClient
 from tests.e2e_support.constants import ISSUER, NUMBER_COUNT, RESPONSE_ID
 from tests.e2e_support.payloads import (
     build_chat_request,
@@ -517,48 +511,20 @@ class E2ESignedClientFlowTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("payload digest mismatch", result.errors[0])
 
-    def test_relay_response_with_supplier_certificate_chain_verifies_end_to_end(self):
-        request = build_chat_request()
-        root_key, root_cert = _root_ca()
-        supplier_key, supplier_cert = _supplier_server_cert(root_key, root_cert, ISSUER)
-
-        with SignedChatHttpServer(
-            response_mode="openai-compatible",
-            signer=_supplier_signer(supplier_key, supplier_cert),
-            certificate_chain=[supplier_cert, root_cert],
-        ) as supplier:
-            with JsonProxyHttpServer(target_base_url=supplier.openai_base_url) as relay:
-                client = CertificateChainSignedChatClient(
-                    endpoint=relay.chat_completions_url,
-                    trust_anchors=[root_cert],
-                )
-                completion = client.create_chat_completion(request)
-
-        self.assertTrue(completion.verification.valid, completion.verification.errors)
-        self.assertEqual(
-            [block.payload_state for block in completion.verification.blocks],
-            [PayloadState.PAYLOAD_VERIFIED, PayloadState.PAYLOAD_VERIFIED],
-        )
-        self.assertEqual(completion.artifact["chain"][0]["block"]["key_id"], certificate_key_id(supplier_cert))
-        self.assertEqual(completion.artifact["chain"][0]["block"]["issuer"], ISSUER)
-
     @unittest.skipIf(OpenAI is None, "openai SDK is not installed")
-    def test_openai_sdk_signature_report_verifies_supplier_chain_through_relay(self):
+    def test_openai_sdk_signature_report_verifies_pinned_public_key_through_proxy(self):
         request = build_chat_request()
-        root_key, root_cert = _root_ca()
-        supplier_key, supplier_cert = _supplier_server_cert(root_key, root_cert, ISSUER)
 
         with SignedChatHttpServer(
+            self.keys,
             response_mode="openai-compatible",
-            signer=_supplier_signer(supplier_key, supplier_cert),
-            certificate_chain=[supplier_cert, root_cert],
-        ) as supplier:
-            with JsonProxyHttpServer(target_base_url=supplier.openai_base_url) as relay:
-                openai_client = OpenAI(api_key="test-key", base_url=relay.openai_base_url)
+        ) as server:
+            with JsonProxyHttpServer(target_base_url=server.openai_base_url) as proxy:
+                openai_client = OpenAI(api_key="test-key", base_url=proxy.openai_base_url)
                 completion = openai_client.chat.completions.create(**request)
                 report = verify_openai_response_signature(
                     completion,
-                    trust_anchors=[root_cert],
+                    public_key=self.keys.public_key,
                 )
 
         self.assertEqual(
@@ -580,7 +546,7 @@ class E2ESignedClientFlowTests(unittest.TestCase):
         ) as server:
             openai_client = OpenAI(api_key="test-key", base_url=server.openai_base_url)
             completion = openai_client.chat.completions.create(**request)
-            report = verify_openai_response_signature(completion, trust_anchors=[])
+            report = verify_openai_response_signature(completion)
 
         self.assertEqual(completion.id, RESPONSE_ID)
         self.assertEqual(
@@ -593,113 +559,18 @@ class E2ESignedClientFlowTests(unittest.TestCase):
         )
 
     @unittest.skipIf(OpenAI is None, "openai SDK is not installed")
-    def test_openai_sdk_signature_report_marks_missing_supplier_chain_invalid(self):
+    def test_openai_sdk_signature_report_reports_unknown_without_pinned_key(self):
         request = build_chat_request()
-        root_key, root_cert = _root_ca()
-        supplier_key, supplier_cert = _supplier_server_cert(root_key, root_cert, ISSUER)
 
-        with SignedChatHttpServer(
-            response_mode="openai-compatible",
-            signer=_supplier_signer(supplier_key, supplier_cert),
-            certificate_chain=[supplier_cert, root_cert],
-        ) as supplier:
-            with JsonProxyHttpServer(
-                target_base_url=supplier.openai_base_url,
-                response_mutator=_drop_supplier_certificate_chain,
-            ) as relay:
-                openai_client = OpenAI(api_key="test-key", base_url=relay.openai_base_url)
-                completion = openai_client.chat.completions.create(**request)
-                report = verify_openai_response_signature(
-                    completion,
-                    trust_anchors=[root_cert],
-                )
+        with SignedChatHttpServer(self.keys, response_mode="openai-compatible") as server:
+            openai_client = OpenAI(api_key="test-key", base_url=server.openai_base_url)
+            completion = openai_client.chat.completions.create(**request)
+            report = verify_openai_response_signature(completion)
 
         summary = openai_response_signature_summary(report)
         self.assertTrue(summary["has_signature"])
         self.assertEqual(summary["host_name"], ISSUER)
-        self.assertFalse(summary["valid"])
-        self.assertEqual(set(summary.keys()), {"has_signature", "host_name", "valid"})
-
-    def test_relay_response_rejects_missing_supplier_certificate_chain(self):
-        request = build_chat_request()
-        root_key, root_cert = _root_ca()
-        supplier_key, supplier_cert = _supplier_server_cert(root_key, root_cert, ISSUER)
-
-        with SignedChatHttpServer(
-            response_mode="openai-compatible",
-            signer=_supplier_signer(supplier_key, supplier_cert),
-            certificate_chain=[supplier_cert, root_cert],
-        ) as supplier:
-            with JsonProxyHttpServer(
-                target_base_url=supplier.openai_base_url,
-                response_mutator=_drop_supplier_certificate_chain,
-            ) as relay:
-                client = CertificateChainSignedChatClient(
-                    endpoint=relay.chat_completions_url,
-                    trust_anchors=[root_cert],
-                )
-                with self.assertRaisesRegex(ValueError, "llm_sign.certificate_chain"):
-                    client.create_chat_completion(request)
-
-    def test_relay_client_reuses_supplier_certificate_chain_after_first_response(self):
-        first_request = build_chat_request()
-        root_key, root_cert = _root_ca()
-        supplier_key, supplier_cert = _supplier_server_cert(root_key, root_cert, ISSUER)
-
-        with SignedChatHttpServer(
-            response_mode="openai-compatible",
-            signer=_supplier_signer(supplier_key, supplier_cert),
-            certificate_chain=[supplier_cert, root_cert],
-        ) as supplier:
-            with JsonProxyHttpServer(
-                target_base_url=supplier.openai_base_url,
-                response_mutator=_drop_supplier_certificate_chain_after_first_response(),
-            ) as relay:
-                client = CertificateChainSignedChatClient(
-                    endpoint=relay.chat_completions_url,
-                    trust_anchors=[root_cert],
-                )
-                first_completion = client.create_chat_completion(first_request)
-                second_request = build_chat_request(
-                    turn_index=1,
-                    previous_turns=[(first_request, first_completion.response)],
-                )
-                second_completion = client.create_chat_completion(second_request)
-
-        self.assertTrue(first_completion.verification.valid, first_completion.verification.errors)
-        self.assertTrue(second_completion.verification.valid, second_completion.verification.errors)
-        self.assertEqual([block.signed_block.block.seq for block in second_completion.verification.blocks], [0, 1, 2, 3])
-
-    def test_relay_response_rejects_wrong_supplier_certificate_chain(self):
-        request = build_chat_request()
-        root_key, root_cert = _root_ca()
-        supplier_key, supplier_cert = _supplier_server_cert(root_key, root_cert, ISSUER)
-        wrong_root_key, wrong_root_cert = _root_ca(common_name="wrong root")
-        _, wrong_supplier_cert = _supplier_server_cert(wrong_root_key, wrong_root_cert, ISSUER)
-
-        with SignedChatHttpServer(
-            response_mode="openai-compatible",
-            signer=_supplier_signer(supplier_key, supplier_cert),
-            certificate_chain=[supplier_cert, root_cert],
-        ) as supplier:
-            with JsonProxyHttpServer(
-                target_base_url=supplier.openai_base_url,
-                response_mutator=lambda response: _replace_supplier_certificate_chain(
-                    response,
-                    [wrong_supplier_cert, wrong_root_cert],
-                ),
-            ) as relay:
-                client = CertificateChainSignedChatClient(
-                    endpoint=relay.chat_completions_url,
-                    trust_anchors=[root_cert, wrong_root_cert],
-                )
-                completion = client.create_chat_completion(request)
-
-        self.assertFalse(completion.verification.valid)
-        self.assertIn(
-            "unresolved, ambiguous, expired, or untrusted key",
-            completion.verification.errors[0],
-        )
+        self.assertIsNone(summary["valid"])
 
     def _client(self, server: SignedChatHttpServer) -> SignedChatClient:
         return SignedChatClient(
@@ -794,114 +665,11 @@ def _modify_artifact_response_numbers(envelope):
     return envelope
 
 
-def _drop_supplier_certificate_chain(response):
-    response["llm_sign"].pop("certificate_chain", None)
-    return response
-
-
-def _drop_supplier_certificate_chain_after_first_response():
-    response_count = 0
-
-    def mutator(response):
-        nonlocal response_count
-        response_count += 1
-        if response_count > 1:
-            response["llm_sign"].pop("certificate_chain", None)
-        return response
-
-    return mutator
-
-
-def _replace_supplier_certificate_chain(response, certificate_chain):
-    response["llm_sign"]["certificate_chain"] = [
-        certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
-        for certificate in certificate_chain
-    ]
-    return response
-
-
 def _chain_index_for_seq(artifact, seq):
     for index, signed in enumerate(artifact["chain"]):
         if signed["block"]["seq"] == seq:
             return index
     raise AssertionError(f"missing chain block for seq {seq}")
-
-
-def _root_ca(common_name="llm-sign e2e root"):
-    key = Ed25519PrivateKey.generate()
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
-    now = dt.datetime.now(dt.timezone.utc)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(subject)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - dt.timedelta(days=1))
-        .not_valid_after(now + dt.timedelta(days=365))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                key_cert_sign=True,
-                key_encipherment=False,
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                encipher_only=False,
-                decipher_only=False,
-                crl_sign=True,
-            ),
-            critical=True,
-        )
-        .sign(private_key=key, algorithm=None)
-    )
-    return key, cert
-
-
-def _supplier_server_cert(root_key, root_cert, dns_name):
-    key = Ed25519PrivateKey.generate()
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, dns_name)])
-    now = dt.datetime.now(dt.timezone.utc)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(root_cert.subject)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - dt.timedelta(days=1))
-        .not_valid_after(now + dt.timedelta(days=30))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                key_cert_sign=False,
-                key_encipherment=False,
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                encipher_only=False,
-                decipher_only=False,
-                crl_sign=False,
-            ),
-            critical=True,
-        )
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
-        .add_extension(
-            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
-            critical=False,
-        )
-        .sign(private_key=root_key, algorithm=None)
-    )
-    return key, cert
-
-
-def _supplier_signer(supplier_key, supplier_cert):
-    return TranscriptSigner(
-        issuer=ISSUER,
-        key_id=certificate_key_id(supplier_cert),
-        private_key=supplier_key,
-    )
 
 
 if __name__ == "__main__":

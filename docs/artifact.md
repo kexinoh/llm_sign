@@ -9,13 +9,11 @@ vLLM-compatible servers, and other OpenAI-compatible clients. Providers use
 The package does not depend on internal platform logs. Integrations SHOULD emit
 the normalized artifact contract below.
 
-In relay deployments, the client may connect to an intermediary rather than the
-LLM supplier. In that case the intermediary TLS certificate is only transport
-security for the client-to-intermediary hop. It is not the transcript signing
-identity. The supplier SHOULD return its issuer certificate chain together with
-the first signed response, and verifiers SHOULD validate that supplier chain
-against their configured TLS or deployment trust anchors before using the leaf
-certificate public key to verify transcript signatures.
+`llm_sign` does not ship a PKI / CA trust chain. Clients establish trust
+by **pinning the provider's transcript-signing public key** out of band.
+When the provider signs with the same private key that terminates its
+TLS endpoint, the public key embedded in its TLS certificate is a
+natural pin.
 
 For vLLM, the provider side can load the same TLS files passed to `vllm serve`:
 
@@ -74,22 +72,19 @@ provider extension field:
 }
 ```
 
-`llm_sign.certificate_chain` is an ordered PEM certificate chain with the
-supplier transcript signing certificate first. It is discovery material, not a
-signed field. A verifier MUST still validate the chain to a configured trust
-anchor and MUST check that the leaf certificate SPKI-derived `key_id` matches
-the signed blocks before accepting the artifact.
-
-For relay or gateway deployments, the `certificate_chain` belongs to the LLM
-supplier, not to the intermediary that delivered the HTTPS response. The
-intermediary may forward or cache this field, but it does not become the signer
-unless it signs its own artifact as a distinct issuer.
+The optional `llm_sign.certificate_chain` is a convenience field: a
+place for the provider to publish its TLS certificate so a client can
+read the public key out of it on first use. It is **discovery material
+only** and is not signed. `llm_sign` does not validate it, does not
+walk it to a trust anchor, and does not consult revocation sources.
 
 Clients that must keep working with providers that do not yet support this
-extension can call `llm_sign.client.verify_openai_response_signature(...)`. That
-helper returns a report with `has_signature`, `host_name`, and `valid`.
-Unsigned responses produce `has_signature: false` and `valid: null` instead of a
-verification exception; signed but invalid responses produce `valid: false`.
+extension can call `llm_sign.client.verify_openai_response_signature(...)`.
+That helper returns a report with `has_signature`, `host_name`, and `valid`.
+Unsigned responses produce `has_signature: false` and `valid: null`;
+signed responses verified against a pinned `public_key` produce
+`valid: true` or `valid: false`; signed responses without a pinned
+public key produce `valid: null` (nothing to verify against).
 
 ## Turn Payloads
 
@@ -126,13 +121,13 @@ links. The block payload state will be `digest_only`.
 
 ## CLI Verification
 
-Static-key verification is available for deployments that intentionally pin a
-bare public key:
+Static-key verification pins a bare public key (or a PEM certificate
+that carries one):
 
 ```sh
 llm-sign-verify artifact.json \
   --issuer provider.example \
-  --public-key provider-ed25519-public.pem
+  --public-key provider-cert.pem
 ```
 
 The command writes compact JSON:
@@ -152,20 +147,3 @@ The command writes compact JSON:
 ```
 
 The process exits with status `0` when the artifact is valid and `1` otherwise.
-
-For X.509 verification, pass the supplier certificate chain as discovery
-material and one or more trust anchors. If a relay response contains
-`llm_sign.certificate_chain`, write that supplier chain to a PEM file before
-calling the CLI:
-
-```sh
-llm-sign-verify artifact.json \
-  --issuer example.com \
-  --certificate-chain supplier-chain.pem \
-  --trust-anchor root-ca.pem \
-  --tls-server-name-mode
-```
-
-`--tls-server-name-mode` binds the block issuer to the leaf certificate DNS name
-and permits `serverAuth` certificates. Without that flag, the verifier expects
-the dedicated transcript-signing issuer extension and EKU.

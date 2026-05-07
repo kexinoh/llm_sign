@@ -3,6 +3,11 @@
 This is the path vLLM-style integrations need: the provider already receives
 ``--ssl-certfile`` and ``--ssl-keyfile``. The certificate key type determines
 the signing suite; it is not assumed to be Ed25519.
+
+The certificate is used purely as a container for the provider's public key
+and host identity. ``llm_sign`` does not run any PKI / CA trust chain
+validation; clients establish trust by pinning the provider's public key
+out of band (see :class:`llm_sign.keys.ed25519.StaticKeyPolicy`).
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from cryptography.x509.oid import ExtensionOID, NameOID
 from llm_sign.core.crypto import infer_suite_for_private_key
 from llm_sign.core.errors import VerificationError
 from llm_sign.core.blocks import TranscriptSigner
-from llm_sign.keys.x509 import certificate_key_id, load_pem_certificates
+from llm_sign.keys.tls import certificate_key_id, load_pem_certificates
 
 
 @dataclass(frozen=True)

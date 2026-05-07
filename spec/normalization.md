@@ -22,7 +22,9 @@ to the preceding block. The resulting chain provides issuer authentication,
 payload integrity, and ordering integrity for the signed statements.
 
 Issuer public keys are resolved by a verifier-defined key policy. The baseline
-CA key policy is specified in [ISSUER-PKI].
+key policy pins trusted public keys out of band (for example the public key
+published as part of the provider's TLS certificate); no certification path
+validation is performed by this specification.
 
 ## 2. Conventions and Definitions
 
@@ -102,16 +104,16 @@ resolve this tuple under its key policy to exactly one trusted public key before
 accepting a signature. If key resolution returns zero keys, multiple keys, an
 expired key, or a key outside the verifier policy, verification MUST fail.
 
-The baseline CA key policy uses X.509 certificate path validation and the CA
-model commonly used with TLS. It is specified in [ISSUER-PKI]. Transport TLS
-authentication alone MUST NOT be treated as transcript signature verification;
-the transcript block still has to be signed and verified.
+The baseline key policy pins one or more trusted public keys out of band
+and does not perform certification path validation. Transport TLS
+authentication alone MUST NOT be treated as transcript signature
+verification; the transcript block still has to be signed and verified.
 
 When a transcript is delivered through a relay or gateway, the client-visible
-TLS connection authenticates only that relay hop. Supplier key discovery can be
-carried in wrapper metadata such as a response-envelope certificate chain, but
-the discovered chain still has to validate under the verifier key policy before
-any transcript signature is accepted.
+TLS connection authenticates only that relay hop. Supplier key discovery can
+be carried in wrapper metadata such as a response-envelope certificate (which
+a client MAY use to read the provider's public key out of on first use), but
+that material is never treated as trust evidence by itself.
 
 ## 5. Primitive Encoding
 
@@ -510,10 +512,9 @@ Container metadata, cached digests, and discovered certificate chains are not
 signed by the transcript signature unless a profile or extension explicitly
 commits to them.
 
-In relay deployments, a discovered certificate chain identifies the supplier
-only after path validation and issuer/key binding checks. A verifier MUST NOT
-substitute the relay's TLS peer certificate for the supplier certificate unless
-the relay is the signed block issuer.
+In relay deployments, a discovered certificate carries the supplier's public
+key as a convenience for the client. It is not treated as trust evidence on
+its own: trust is established only by an out-of-band pin of that public key.
 
 Profile design is security-critical. Omitting model-visible material from a
 profile can cause different interactions to share the same canonical payload.
@@ -553,15 +554,11 @@ this specification and by the profile.
 
 A baseline version 1 verifier conforms only if it supports
 `sha256-ed25519-v1`, `provider_received_input`, `provider_output`, the baseline
-chain rules, and a key policy. A CA-mode verifier additionally conforms to
-[ISSUER-PKI].
+chain rules, and a key policy that pins the signer's public key out of band.
 
 ## 20. References
 
 ### 20.1. Normative References
-
-[ISSUER-PKI]
-: llm_sign, "Issuer PKI Profile", `spec/issuer-pki.md`.
 
 [RFC2119]
 : Bradner, S., "Key words for use in RFCs to Indicate Requirement Levels",

@@ -9,7 +9,7 @@ from copy import deepcopy
 import llm_sign
 #---------
 
-from _signed_openai_fixture import SIGNED_CHAT_COMPLETION
+from _signed_openai_fixture import SIGNED_CHAT_COMPLETION, load_supplier_public_key
 
 
 def main() -> int:
@@ -19,12 +19,10 @@ def main() -> int:
     tampered = llm_sign.client.artifact_from_openai_response(tampered_response)
     tampered["turns"][0]["response"]["choices"][0]["message"]["content"] = "Goodbye."
 
-    certificate_chain = llm_sign.client.certificate_chain_from_openai_response(
-        tampered_response
-    )
+    public_key = load_supplier_public_key()
     report = llm_sign.client.verify_openai_response_signature(
         tampered_response,
-        trust_anchors=[certificate_chain[-1]],
+        public_key=public_key,
     )
     print(
         json.dumps(

@@ -1,10 +1,8 @@
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional
 
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
 from llm_sign import (
     Ed25519KeyPair,
     OpenAIChatInputProfile,
@@ -25,13 +23,8 @@ class SignedChatHttpServer:
         host: str = "127.0.0.1",
         response_mode: str = "artifact-envelope",
         signer: Optional[TranscriptSigner] = None,
-        certificate_chain: Optional[Sequence[x509.Certificate]] = None,
     ) -> None:
-        self._service = SignedChatService(
-            keys=keys,
-            signer=signer,
-            certificate_chain=certificate_chain,
-        )
+        self._service = SignedChatService(keys=keys, signer=signer)
         self._response_mode = response_mode
         self._server = _ThreadingHTTPServer((host, 0), self._handler_class())
         self._thread = Thread(target=self._server.serve_forever, daemon=True)
@@ -91,7 +84,6 @@ class SignedChatService:
         *,
         keys: Optional[Ed25519KeyPair] = None,
         signer: Optional[TranscriptSigner] = None,
-        certificate_chain: Optional[Sequence[x509.Certificate]] = None,
     ) -> None:
         if signer is None:
             if keys is None:
@@ -102,7 +94,6 @@ class SignedChatService:
                 private_key=keys.private_key,
             )
         self.signer = signer
-        self.certificate_chain = list(certificate_chain or [])
         self.input_profile = OpenAIChatInputProfile()
         self.output_profile = OpenAIChatOutputProfile()
         self.tool_result_profile = OpenAIToolResultProfile()
@@ -122,11 +113,6 @@ class SignedChatService:
             response = self._openai_response(self._response_for_request(request))
             artifact = self._append_turn_artifact(request, response)
             response["llm_sign"] = {"artifact": artifact}
-            if self.certificate_chain:
-                response["llm_sign"]["certificate_chain"] = [
-                    certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
-                    for certificate in self.certificate_chain
-                ]
             return response
 
     def create_unsigned_openai_chat_completion(self, request: Mapping[str, Any]) -> dict[str, Any]:

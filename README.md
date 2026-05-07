@@ -9,7 +9,7 @@ provider attach a provider-signed transcript to every OpenAI-compatible
 response, so a downstream client can verify, end-to-end, that the
 request it sent and the response it got back have not been tampered
 with on the wire — and that they came from a specific provider
-identity bound to a TLS certificate.
+identity.
 
 - Zero impact when disabled. Unsigned responses stay byte-identical to
   upstream.
@@ -17,6 +17,23 @@ identity bound to a TLS certificate.
   official vLLM integration.
 - Transport-agnostic. The signature lives in the response JSON, so it
   survives HTTPS relays, proxies, and gateways.
+
+## Trust model
+
+`llm_sign` does **not** ship a PKI / CA trust chain. Instead, it
+reuses the SSL material the provider already has on disk:
+
+- The provider signs transcripts with the same private key that
+  terminates its TLS endpoint (for example the file passed to vLLM as
+  `--ssl-keyfile`).
+- The client **pins the provider's public key** out of band — for
+  example by reading it from the provider's published TLS certificate
+  — and verifies signatures directly against that pinned key.
+
+There is no certification path validation, no trust anchor store, no
+CRL / OCSP, and no certificate extension introspection inside
+`llm_sign`. A provider's certificate is used purely as a convenient
+container for its public key and host name.
 
 ## Install
 
@@ -38,7 +55,8 @@ from llm_sign.client import (
     verify_openai_response_with_public_key,
 )
 
-# The provider's certificate (or leaf of their signing chain).
+# The provider's certificate (or a PEM public key file). Only the
+# public key is used; llm_sign does not validate the certificate.
 with open("provider-cert.pem") as f:
     public_key = load_pem_certificates(f.read())[0].public_key()
 
@@ -70,11 +88,12 @@ both signed and unsigned providers, use the non-raising variant:
 ```python
 from llm_sign.client import verify_openai_response_signature
 
-report = verify_openai_response_signature(response)
+report = verify_openai_response_signature(response, public_key=public_key)
 
 report.has_signature   # True  / False
 report.host_name       # provider host name, if signed
-report.valid           # True / False / None (None = no signature to check)
+report.valid           # True / False / None
+                       # None = nothing to verify (unsigned, or no pinned key)
 ```
 
 ## Quickstart (provider): sign a response
@@ -98,15 +117,18 @@ artifact = llm_sign.server.sign_openai_chat_turn(
 )
 
 # Attach to the HTTP response that goes on the wire:
-response_dict["llm_sign"] = {
-    "artifact": artifact,
-    "certificate_chain": credential.certificate_chain_pem(),
-}
+response_dict["llm_sign"] = {"artifact": artifact}
 ```
 
 The issuer (provider identity claimed in the signature) is derived
 from your certificate's SAN/CN, so it matches your TLS server name
 automatically. RSA, P-256 ECDSA, and Ed25519 keys are all supported.
+
+Optionally include `credential.certificate_chain_pem()` under
+`llm_sign.certificate_chain` in the response so clients have a
+convenient place to read the provider public key from. The field is
+**discovery material only** — `llm_sign` does not build a trust chain
+from it; clients still verify against a pinned public key.
 
 ### Just want to play without a real cert?
 
@@ -157,42 +179,16 @@ Every non-streaming `/v1/chat/completions` response now carries an
 byte-identical to upstream vLLM: no schema changes, no new keys, no
 client breakage.
 
-## Relay and gateway setups
-
-For deployments where the client talks to a relay that re-serves a
-supplier's signed artifacts, you can pin the relay's trust anchors
-and let the verifier check the full certificate chain automatically:
-
-```python
-from llm_sign.client import (
-    load_pem_certificates,
-    verify_openai_response_with_certificate_chain,
-)
-
-with open("root-ca.pem", "rb") as f:
-    trust_anchors = load_pem_certificates(f.read())
-
-result = verify_openai_response_with_certificate_chain(
-    response,
-    trust_anchors=trust_anchors,
-)
-```
-
-The supplier's leaf + chain come from the signed response itself;
-the relay's HTTPS certificate only authenticates the transport hop,
-not the supplier signing identity.
-
 ## Command-line verifier
 
 ```sh
 llm-sign-verify artifact.json \
   --issuer api.example.com \
-  --certificate-chain supplier-chain.pem \
-  --trust-anchor root-ca.pem \
-  --tls-server-name-mode
+  --public-key provider-cert.pem
 ```
 
-Handy for CI checks, audit logs, or post-hoc forensics.
+`--public-key` accepts either a PEM/DER public key or a PEM
+certificate (the certificate's public key is extracted and used).
 
 ## Protocol and versioning
 
@@ -215,8 +211,6 @@ bump it; only wire-format changes do.
 
 - [spec/normalization.md](spec/normalization.md) — canonical JSON and
   digest construction
-- [spec/issuer-pki.md](spec/issuer-pki.md) — X.509 issuer profile and
-  TLS identity binding
 - [docs/artifact.md](docs/artifact.md) — signed artifact envelope
 - [example/](example/) — runnable scripts, including offline verify
   and tamper-detection demos

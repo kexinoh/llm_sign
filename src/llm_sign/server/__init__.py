@@ -12,7 +12,8 @@ from llm_sign.core.blocks import (
 )
 from llm_sign.keys.ed25519 import Ed25519KeyPair
 from llm_sign.profiles.openai_chat import OpenAIChatInputProfile, OpenAIChatOutputProfile
-from llm_sign.vendor import TLSCertificateCredential, load_pem_certificates
+from llm_sign.keys.tls import load_pem_certificates
+from llm_sign.vendor import TLSCertificateCredential
 
 
 DEFAULT_ISSUER = "provider.example"

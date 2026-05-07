@@ -1,6 +1,6 @@
 """Provider-side helpers for producing signed transcript artifacts."""
 
-from llm_sign.keys.x509 import load_pem_certificates
+from llm_sign.keys.tls import load_pem_certificates
 
 from .tls import TLSCertificateCredential
 
