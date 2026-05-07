@@ -61,45 +61,6 @@ The full threat model and wire-format specification live in
 
 ---
 
-**Cryptographic provenance for LLM responses.** `llm_sign` lets an LLM
-provider attach a provider-signed transcript to every OpenAI-compatible
-response, so a downstream client can verify, end-to-end, that the
-request it sent and the response it got back have not been tampered
-with on the wire — even when a relay sits between them.
-
-- Zero impact when disabled. Unsigned responses stay byte-identical to
-  upstream.
-- OpenAI-compatible. Works today with vLLM-style providers via an
-  official vLLM integration.
-- Transport-agnostic. The signature lives in the response JSON, so it
-  survives HTTPS relays, proxies, and gateways.
-- No new PKI. The client authenticates the provider certificate using
-  the same TLS / X.509 rules a browser uses against an HTTPS server.
-
-## Threat model
-
-The threat is a middleman / relay between the client and the real LLM
-provider (for example a paid gateway or an API aggregator). The
-client's own HTTPS session authenticates only the relay, so plain TLS
-alone cannot tell the client whether the request actually reached the
-provider or whether the response was tampered with on the way back.
-
-`llm_sign` closes this gap by having the provider sign every turn
-with its TLS private key, and ship its TLS certificate chain inside
-the signed response at `response["llm_sign"]["certificate_chain"]`.
-The client validates that chain the same way an HTTPS client
-validates a server certificate — standard X.509 path validation
-against the system TLS trust store, with SAN name matching — and then
-verifies the transcript against the validated leaf's public key.
-
-- The relay cannot forge a signature because it does not hold the
-  provider's TLS private key.
-- The relay cannot substitute a different certificate either: the
-  signed `key_id` field is an SPKI-SHA256 of the signer's public key,
-  and the client cross-checks it against the validated leaf's SPKI.
-
-The full specification of this binding lives in
-[`spec/provider-certificate-binding.md`](spec/provider-certificate-binding.md).
 
 ## Install
 
