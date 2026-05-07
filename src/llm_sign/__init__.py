@@ -35,6 +35,12 @@ from .profiles.openai_chat import (
     project_openai_chat_request,
     project_openai_chat_response,
 )
+from .profiles.openai_responses import (
+    OpenAIResponsesInputProfile,
+    OpenAIResponsesOutputProfile,
+    project_openai_responses_request,
+    project_openai_responses_response,
+)
 from .vendor import TLSCertificateCredential
 from .verifier import load_signed_blocks, verify_artifact
 
@@ -45,6 +51,8 @@ __all__ = [
     "Ed25519KeyPair",
     "OpenAIChatInputProfile",
     "OpenAIChatOutputProfile",
+    "OpenAIResponsesInputProfile",
+    "OpenAIResponsesOutputProfile",
     "OpenAIToolResultProfile",
     "PayloadState",
     "SignedBlock",
@@ -60,6 +68,8 @@ __all__ = [
     "load_signed_blocks",
     "project_openai_chat_request",
     "project_openai_chat_response",
+    "project_openai_responses_request",
+    "project_openai_responses_response",
     "sign_payload",
     "register_signature_suite",
     "supported_suite_ids",

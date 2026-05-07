@@ -302,6 +302,14 @@ def verify_chain(
             errors.append(f"seq {getattr(block, 'seq', '?')}: {exc}")
             return ChainVerification(False, verified, errors)
 
+    if enforce_baseline_turns:
+        try:
+            _check_chain_terminates_with_provider_output(blocks)
+        except VerificationError as exc:
+            last_seq = blocks[-1].block.seq if blocks else "?"
+            errors.append(f"seq {last_seq}: {exc}")
+            return ChainVerification(False, verified, errors)
+
     return ChainVerification(True, verified, [])
 
 
@@ -369,6 +377,55 @@ def _check_supported_block_type_sequence(
     elif block.type == TOOL_RESULT:
         if previous_type not in {PROVIDER_OUTPUT, TOOL_RESULT}:
             raise VerificationError(f"unexpected block type at seq {block.seq}: {block.type}")
+
+
+def _check_chain_terminates_with_provider_output(
+    blocks: List[SignedBlock],
+) -> None:
+    """Reject chains where any turn lacks its corresponding ``PROVIDER_OUTPUT``.
+
+    A signed turn is meaningful only when both halves are present: the
+    request the provider received *and* the response it produced. Without
+    this rule a relay could strip the output block (or never sign it)
+    and still ship a chain that links and signature-verifies cleanly,
+    which would let the relay synthesize an unsigned response while
+    pointing the user at a signed-looking artifact. We therefore require
+    every ``PROVIDER_RECEIVED_INPUT`` to be closed by a later
+    ``PROVIDER_OUTPUT`` in the same chain — equivalently, the last block
+    in the chain must be ``PROVIDER_OUTPUT`` (a ``TOOL_RESULT`` tail
+    means the provider's reply to the most recent input is missing).
+    """
+
+    last = blocks[-1].block
+    if last.type != PROVIDER_OUTPUT:
+        raise VerificationError(
+            "chain must terminate with a provider_output block; "
+            f"got terminating type {last.type!r}"
+        )
+
+    pending_input = False
+    for signed in blocks:
+        block_type = signed.block.type
+        if block_type == PROVIDER_RECEIVED_INPUT:
+            if pending_input:
+                # Two inputs in a row would have been caught by the
+                # per-block sequence rule, but be defensive.
+                raise VerificationError(
+                    "provider_received_input not closed by provider_output"
+                )
+            pending_input = True
+        elif block_type == PROVIDER_OUTPUT:
+            if not pending_input:
+                raise VerificationError(
+                    "provider_output without preceding provider_received_input"
+                )
+            pending_input = False
+        # TOOL_RESULT does not open or close a turn.
+
+    if pending_input:
+        raise VerificationError(
+            "provider_received_input not closed by provider_output"
+        )
 
 
 def _verify_payload(

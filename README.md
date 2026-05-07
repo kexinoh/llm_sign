@@ -41,9 +41,17 @@ Your HTTPS session only proves "I really did connect to the relay". It
    certificate's public key.
 3. Because the relay does **not** hold the provider's TLS private key,
    the relay cannot:
-   - change the content (any edit invalidates the signature);
+   - change the content (any edit to the visible response body —
+     `choices`, `model`, ...  — is detected: the high-level
+     `verify_openai_response*` APIs pin the user-visible body to the
+     chain's terminating `provider_output` block, so a relay that
+     leaves the artifact intact and only rewrites visible fields is
+     rejected with `payload digest mismatch`);
    - swap the model (the model name and output are inside the signed
      transcript);
+   - ship a chain that omits the response (a chain whose last block is
+     `provider_received_input` is rejected — every signed input must
+     be closed by a signed `provider_output`);
    - fabricate a "provider response" (no way to produce a valid
      signature);
    - swap the certificate either (the signed `key_id` is the

@@ -8,8 +8,13 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from llm_sign import OpenAIChatInputProfile, StaticKeyPolicy, verify_chain
-from llm_sign.blocks import PROVIDER_RECEIVED_INPUT
+from llm_sign import (
+    OpenAIChatInputProfile,
+    OpenAIChatOutputProfile,
+    StaticKeyPolicy,
+    verify_chain,
+)
+from llm_sign.blocks import PROVIDER_OUTPUT, PROVIDER_RECEIVED_INPUT
 from llm_sign.vendor import TLSCertificateCredential
 
 
@@ -46,15 +51,33 @@ class VendorTlsTests(unittest.TestCase):
         self.assertEqual(credential.issuer, "vllm.example")
         self.assertEqual(credential.suite_id, "sha256-rsa-pss-v1")
 
-        profile = OpenAIChatInputProfile()
-        payload = {
+        input_profile = OpenAIChatInputProfile()
+        output_profile = OpenAIChatOutputProfile()
+        request_payload = {
             "model": "Qwen/Qwen3-Coder",
             "messages": [{"role": "user", "content": "hello"}],
         }
-        signed = credential.signer().sign_payload(
+        response_payload = {
+            "model": "Qwen/Qwen3-Coder",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+        }
+        signer = credential.signer()
+        input_block = signer.sign_payload(
             block_type=PROVIDER_RECEIVED_INPUT,
-            profile=profile,
-            payload=payload,
+            profile=input_profile,
+            payload=request_payload,
+        )
+        output_block = signer.sign_payload(
+            block_type=PROVIDER_OUTPUT,
+            profile=output_profile,
+            payload=response_payload,
+            previous=input_block,
         )
         public_key = leaf_cert.public_key()
         policy = StaticKeyPolicy(
@@ -62,10 +85,13 @@ class VendorTlsTests(unittest.TestCase):
         )
 
         result = verify_chain(
-            [signed],
+            [input_block, output_block],
             key_policy=policy,
-            profiles={profile.profile_id: profile},
-            payloads={0: payload},
+            profiles={
+                input_profile.profile_id: input_profile,
+                output_profile.profile_id: output_profile,
+            },
+            payloads={0: request_payload, 1: response_payload},
         )
 
         self.assertTrue(result.valid, result.errors)

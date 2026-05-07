@@ -12,12 +12,17 @@ from llm_sign.core.blocks import (
 )
 from llm_sign.keys.ed25519 import Ed25519KeyPair
 from llm_sign.profiles.openai_chat import OpenAIChatInputProfile, OpenAIChatOutputProfile
+from llm_sign.profiles.openai_responses import (
+    OpenAIResponsesInputProfile,
+    OpenAIResponsesOutputProfile,
+)
 from llm_sign.keys.tls import load_pem_certificates
 from llm_sign.vendor import TLSCertificateCredential
 
 
 DEFAULT_ISSUER = "provider.example"
 OPENAI_COMPATIBLE_PLATFORM = "openai-compatible"
+OPENAI_RESPONSES_PLATFORM = "openai-responses"
 ARTIFACT_SCHEMA = "llm-sign.artifact.v1"
 
 # Artifact protocol version this build produces. A single integer tied to
@@ -109,6 +114,99 @@ def sign_openai_chat_turns(
     return create_artifact(chain=chain, turns=artifact_turns)
 
 
+def sign_openai_responses_turn(
+    *,
+    request: Mapping[str, Any],
+    response: Mapping[str, Any],
+    signer: TranscriptSigner,
+    parent_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Sign one OpenAI Responses API request/response turn.
+
+    Unlike :func:`sign_openai_chat_turn`, the Responses API is stateful:
+    a request carries ``previous_response_id`` as a pointer to a prior
+    turn whose content lives in the server's store, not in the current
+    request body. This function signs the pointer (via the input
+    profile's whitelist) but *not* the content of that prior turn —
+    that was already signed by the prior turn's own artifact. The
+    client is responsible for linking consecutive artifacts locally
+    (see ``llm_sign.client.verify_openai_responses_chain``).
+
+    Every call produces a fresh 2-block chain (seq 0 = provider_received_input,
+    seq 1 = provider_output) with a fresh ``chain_id``. This mirrors
+    vLLM's stateless signing path and means forked turns (the same
+    ``previous_response_id`` referenced twice) each get their own
+    independent artifact — per the protocol spec, this is expected.
+
+    ``parent_hash``: when supplied, the server's trusted hash of the
+    ``previous_response_id`` turn's artifact. It is injected into the
+    signed input payload under ``previous_response_hash`` so the
+    current turn's signature is bound to a specific parent artifact,
+    not merely to whatever content is currently sitting under that id
+    string. Clients that verify multi-turn sessions cross-check this
+    signed field against the hash they observed on the prior turn's
+    envelope; any mismatch signals that the parent was substituted
+    between signing and verification (e.g. via session-store
+    poisoning, or a relay that showed the client a different parent
+    from the one the provider actually continued). Server integrations
+    should derive the hash from their own session store (not from
+    client-supplied input) — this is what makes the cross-check
+    meaningful.
+    """
+
+    input_profile = OpenAIResponsesInputProfile()
+    output_profile = OpenAIResponsesOutputProfile()
+
+    signed_request: Mapping[str, Any]
+    if parent_hash is not None:
+        # Inject the server-trusted parent hash into the signed input.
+        # We avoid mutating the caller's dict.
+        signed_request = {**dict(request), "previous_response_hash": parent_hash}
+    else:
+        signed_request = request
+
+    input_block = signer.sign_payload(
+        block_type=PROVIDER_RECEIVED_INPUT,
+        profile=input_profile,
+        payload=signed_request,
+    )
+    output_block = signer.sign_payload(
+        block_type=PROVIDER_OUTPUT,
+        profile=output_profile,
+        payload=response,
+        previous=input_block,
+    )
+
+    return create_artifact(
+        chain=[input_block, output_block],
+        turns=[{"request": dict(signed_request), "response": dict(response)}],
+        platform=OPENAI_RESPONSES_PLATFORM,
+    )
+
+
+def artifact_terminal_digest(artifact: Mapping[str, Any]) -> Optional[str]:
+    """Return the base64url-encoded block_digest of the chain's last block.
+
+    This is the canonical "fingerprint" of an artifact — every byte
+    that affects the signed transcript (payload digests, block
+    metadata, previous-block links) flows into this digest, and the
+    digest itself is part of what the provider's key signs at the
+    terminating block. Downstream integrations can use this as the
+    ``parent_hash`` to bind a later turn to this specific artifact.
+
+    Returns ``None`` if the artifact has no chain (malformed input).
+    """
+
+    chain = artifact.get("chain", artifact.get("signed_blocks"))
+    if not isinstance(chain, list) or not chain:
+        return None
+    last = chain[-1]
+    if not isinstance(last, Mapping):
+        return None
+    digest = last.get("block_digest")
+    return digest if isinstance(digest, str) else None
+
+
 def create_artifact(
     *,
     chain: Sequence[SignedBlock],
@@ -166,6 +264,14 @@ def attach_signed_artifact_to_openai_response(
     provider's private key, and swapping the chain would cause the
     signed ``key_id`` to no longer match the leaf public key.
 
+    Additionally writes ``response["llm_sign"]["artifact_hash"]`` — the
+    base64url-encoded ``block_digest`` of the artifact's terminating
+    block (see :func:`artifact_terminal_digest`). This is a
+    convenience copy of a value already implicit in the signed chain;
+    Responses API server integrations persist the response envelope
+    (including this field) in their session store so they can later
+    inject the parent's hash into the signed input of a follow-up turn.
+
     Returns ``response`` for convenience.
     """
 
@@ -174,6 +280,9 @@ def attach_signed_artifact_to_openai_response(
         certificate_chain_pem = credential.certificate_chain_pem()
     if certificate_chain_pem is not None:
         llm_sign["certificate_chain"] = list(certificate_chain_pem)
+    terminal_digest = artifact_terminal_digest(artifact)
+    if terminal_digest is not None:
+        llm_sign["artifact_hash"] = terminal_digest
     response["llm_sign"] = llm_sign
     return response
 
@@ -182,8 +291,10 @@ __all__ = [
     "ARTIFACT_SCHEMA",
     "DEFAULT_ISSUER",
     "OPENAI_COMPATIBLE_PLATFORM",
+    "OPENAI_RESPONSES_PLATFORM",
     "PROTOCOL_VERSION",
     "TLSCertificateCredential",
+    "artifact_terminal_digest",
     "attach_signed_artifact_to_openai_response",
     "create_artifact",
     "create_signer",
@@ -191,5 +302,6 @@ __all__ = [
     "load_pem_certificates",
     "sign_openai_chat_turn",
     "sign_openai_chat_turns",
+    "sign_openai_responses_turn",
     "signer_from_key_pair",
 ]

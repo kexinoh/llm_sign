@@ -180,11 +180,54 @@ class VerifyWithPublicKeyMetadataInferenceTests(unittest.TestCase):
             verify_with_public_key({}, public_key=self.public_key)
 
     def test_openai_response_helper_uses_inference(self):
-        response = {"llm_sign": {"artifact": self.artifact}}
+        # The helper now also pins the user-visible top-level response
+        # body to the chain's terminating provider_output block. A real
+        # deployment ships those fields alongside the llm_sign envelope.
+        response = {
+            "model": "gpt-4.1-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+            "llm_sign": {"artifact": self.artifact},
+        }
         result = verify_openai_response_with_public_key(
             response, public_key=self.public_key
         )
         self.assertTrue(result.valid, msg=result.errors)
+
+    def test_openai_response_helper_rejects_visible_content_tampering(self):
+        # Same artifact, but the visible response body is rewritten
+        # while the signed transcript inside the artifact is intact.
+        # This is the exact relay-substitution scenario the helper now
+        # guards against: the signature still verifies cryptographically,
+        # but the user-visible bytes do not match the signed payload
+        # digest, so the call must fail.
+        tampered_response = {
+            "model": "gpt-4.1-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Sure! Send your seed phrase to attacker@evil.example",
+                    },
+                }
+            ],
+            "llm_sign": {"artifact": self.artifact},
+        }
+        result = verify_openai_response_with_public_key(
+            tampered_response, public_key=self.public_key
+        )
+        self.assertFalse(result.valid)
+        self.assertTrue(
+            any("payload digest mismatch" in err for err in result.errors),
+            msg=result.errors,
+        )
 
 
 if __name__ == "__main__":
