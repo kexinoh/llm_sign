@@ -25,8 +25,11 @@ import pathlib
 import statistics
 import time
 
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
 import llm_sign
 from llm_sign import project_openai_chat_request, project_openai_chat_response
+from llm_sign.core.crypto import infer_suite_for_private_key
 from llm_sign.server import (
     TLSCertificateCredential,
     attach_signed_artifact_to_openai_response,
@@ -190,11 +193,13 @@ def main() -> None:
         ssl_certfile=args.certfile, ssl_keyfile=args.keyfile,
     )
     signer = cred.signer()
-    suite_id = (
-        getattr(signer, "suite_id", None)
-        or getattr(getattr(signer, "_suite", None), "suite_id", None)
-        or "?"
-    )
+    # ``infer_suite_for_private_key`` is the same helper the server-side code
+    # uses to pick a signature suite from the certificate's private key, and
+    # it returns the public suite id string. Prefer it over reaching into the
+    # signer's internals.
+    with open(args.keyfile, "rb") as f:
+        _priv = load_pem_private_key(f.read(), password=None)
+    suite_id = infer_suite_for_private_key(_priv)
     print(f"llm_sign version: {llm_sign.__version__}")
     print(f"signer suite: {suite_id!r}")
     print(f"cert chain PEM count: {len(cred.certificate_chain_pem())}")

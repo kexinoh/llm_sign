@@ -20,6 +20,10 @@ import pathlib
 import statistics
 import time
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, utils
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
 import llm_sign
 from llm_sign import project_openai_chat_request, project_openai_chat_response
 from llm_sign.core.crypto import infer_suite_for_private_key
@@ -98,23 +102,15 @@ def main() -> None:
     for label, cf, kf in SUITES:
         cred = TLSCertificateCredential.from_files(ssl_certfile=str(cf), ssl_keyfile=str(kf))
         signer = cred.signer()
-        suite = (
-            getattr(signer, "suite_id", None)
-            or getattr(signer, "_suite_id", None)
-        )
-        if suite is None and hasattr(signer, "_suite"):
-            suite = getattr(signer._suite, "suite_id", None)
-
-        from cryptography.hazmat.primitives.serialization import load_pem_private_key
-
+        # ``infer_suite_for_private_key`` is the library's own helper for
+        # mapping a private key to the public suite id string. Prefer it
+        # over reaching into the signer's internals.
         key_obj = load_pem_private_key(pathlib.Path(kf).read_bytes(), password=None)
-        suite_raw = infer_suite_for_private_key(key_obj)
-        suite2 = getattr(suite_raw, "suite_id", suite_raw)
+        suite_id = infer_suite_for_private_key(key_obj)
         chain_bytes = sum(len(p.encode()) for p in cred.certificate_chain_pem())
-        creds.append((label, cred, signer, suite2))
+        creds.append((label, cred, signer, suite_id))
         print(
-            f"  [{label:<12}] signer.suite={suite!s:<24} infer_suite={suite2!s:<24}  "
-            f"cert PEM bytes={chain_bytes}"
+            f"  [{label:<12}] suite={suite_id:<24}  cert PEM bytes={chain_bytes}"
         )
     print()
 
@@ -152,23 +148,39 @@ def main() -> None:
             )
         print(f"  (request JSON={req_b:,}B, response JSON={resp_b:,}B)")
 
-    print("\n--- pure asymmetric sign() on a 32-byte digest-sized message ---")
-    msg = b"\x00" * 32
+    # Pure asymmetric signature micro-benchmark.
+    #
+    # The bench mirrors what ``SignatureSuite.sign_digest`` does in
+    # ``llm_sign/core/crypto.py``:
+    #   * RSA-PSS-SHA256: ``PSS(MGF1(SHA256), salt_length=DIGEST_LENGTH)``
+    #     over a pre-hashed 32-byte digest (``utils.Prehashed``).
+    #   * ECDSA-P256-SHA256: ``ec.ECDSA(utils.Prehashed(SHA256()))`` over
+    #     the same 32-byte digest.
+    #   * Ed25519: ``private_key.sign(digest)``, which internally uses the
+    #     PureEdDSA construction over the raw input.
+    #
+    # Using ``Prehashed`` isolates the asymmetric operation from the
+    # SHA-256 pass, which otherwise dominates for tiny inputs and would
+    # double-count against the canonical-JSON + SHA-256 cost already
+    # captured in the full-pipeline numbers above.
+    print("\n--- pure asymmetric sign() on a 32-byte digest (mirrors SignatureSuite.sign_digest) ---")
+    digest = b"\x00" * 32
+    rsa_padding = padding.PSS(
+        mgf=padding.MGF1(hashes.SHA256()),
+        salt_length=padding.PSS.DIGEST_LENGTH,
+    )
+    prehashed_sha256 = utils.Prehashed(hashes.SHA256())
     for label, cf, kf in SUITES:
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
-        from cryptography.hazmat.primitives.serialization import load_pem_private_key
-
         key = load_pem_private_key(pathlib.Path(kf).read_bytes(), password=None)
         if isinstance(key, rsa.RSAPrivateKey):
             def sign_fn(_k=key):
-                _k.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+                _k.sign(digest, rsa_padding, prehashed_sha256)
         elif isinstance(key, ec.EllipticCurvePrivateKey):
             def sign_fn(_k=key):
-                _k.sign(msg, ec.ECDSA(hashes.SHA256()))
+                _k.sign(digest, ec.ECDSA(prehashed_sha256))
         elif isinstance(key, ed25519.Ed25519PrivateKey):
             def sign_fn(_k=key):
-                _k.sign(msg)
+                _k.sign(digest)
         else:
             print(f"  [{label}] unsupported")
             continue

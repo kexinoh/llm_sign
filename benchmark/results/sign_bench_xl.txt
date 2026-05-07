@@ -1,17 +1,17 @@
 llm_sign 0.1.0
 
 === 200K chars  (~50K tokens)  (request JSON=200,225B, response JSON=638B) ===
-  FULL pipeline                    n= 20 mean=   1.374ms median=   1.342ms p90=   1.595ms p99=   1.751ms min=   1.277ms max=   1.751ms
-  sign_openai_chat_turn only       n= 20 mean=   1.339ms median=   1.323ms p90=   1.409ms p99=   1.578ms min=   1.302ms max=   1.578ms
+  FULL pipeline                    n= 20 mean=   1.360ms median=   1.340ms p90=   1.478ms p99=   1.612ms min=   1.311ms max=   1.612ms
+  sign_openai_chat_turn only       n= 20 mean=   1.320ms median=   1.309ms p90=   1.326ms p99=   1.566ms min=   1.278ms max=   1.566ms
 
 === 400K chars  (~100K tokens)  (request JSON=400,225B, response JSON=638B) ===
-  FULL pipeline                    n= 20 mean=   2.096ms median=   2.077ms p90=   2.330ms p99=   2.332ms min=   1.957ms max=   2.332ms
-  sign_openai_chat_turn only       n= 20 mean=   2.053ms median=   2.052ms p90=   2.090ms p99=   2.320ms min=   1.942ms max=   2.320ms
+  FULL pipeline                    n= 20 mean=   2.069ms median=   2.041ms p90=   2.299ms p99=   2.316ms min=   2.010ms max=   2.316ms
+  sign_openai_chat_turn only       n= 20 mean=   2.035ms median=   2.022ms p90=   2.043ms p99=   2.275ms min=   2.007ms max=   2.275ms
 
 === 800K chars  (~200K tokens)  (request JSON=800,225B, response JSON=638B) ===
-  FULL pipeline                    n= 10 mean=   3.603ms median=   3.580ms p90=   3.826ms p99=   3.826ms min=   3.537ms max=   3.826ms
-  sign_openai_chat_turn only       n= 10 mean=   3.522ms median=   3.575ms p90=   3.670ms p99=   3.670ms min=   3.351ms max=   3.670ms
+  FULL pipeline                    n= 10 mean=   3.519ms median=   3.504ms p90=   3.781ms p99=   3.781ms min=   3.395ms max=   3.781ms
+  sign_openai_chat_turn only       n= 10 mean=   3.426ms median=   3.461ms p90=   3.541ms p99=   3.541ms min=   3.267ms max=   3.541ms
 
 === 800K chars + 4K response  (request JSON=800,225B, response JSON=4,443B) ===
-  FULL pipeline                    n= 10 mean=   3.617ms median=   3.611ms p90=   3.647ms p99=   3.647ms min=   3.579ms max=   3.647ms
-  sign_openai_chat_turn only       n= 10 mean=   3.626ms median=   3.603ms p90=   3.883ms p99=   3.883ms min=   3.577ms max=   3.883ms
+  FULL pipeline                    n= 10 mean=   3.439ms median=   3.439ms p90=   3.537ms p99=   3.537ms min=   3.308ms max=   3.537ms
+  sign_openai_chat_turn only       n= 10 mean=   3.500ms median=   3.494ms p90=   3.732ms p99=   3.732ms min=   3.312ms max=   3.732ms
