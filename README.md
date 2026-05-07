@@ -49,6 +49,15 @@ used purely as a transport for the provider's public key.
 pip install llm-sign
 ```
 
+> The PyPI distribution is `llm-sign` (hyphen), the Python import name
+> is `llm_sign` (underscore) — matching the usual Python packaging
+> convention (e.g. `scikit-learn` / `sklearn`, `typing-extensions` /
+> `typing_extensions`).
+
+```python
+import llm_sign
+```
+
 ## Quickstart (client): verify a signed response
 
 The provider ships its certificate inside the response. The client has
