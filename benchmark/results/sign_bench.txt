@@ -1,0 +1,85 @@
+llm_sign version: 0.1.0
+signer suite: 'sha256-rsa-pss-v1'
+cert chain PEM count: 1
+cert chain bytes: 1115
+repeats=20  warmup=3
+
+=== tiny (baseline) (user_chars=200, assistant_chars=128) ===
+  raw JSON sizes:  request=425B  response=667B
+  projected sizes: request=425B  response=667B
+  project_request                      mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  project_response                     mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  sign_openai_chat_turn                mean=   0.610ms median=   0.598ms p90=   0.606ms p99=   0.850ms min=   0.586ms  max=   0.850ms
+  FULL pipeline (manual envelope)      mean=   0.621ms median=   0.609ms p90=   0.616ms p99=   0.860ms min=   0.602ms  max=   0.860ms
+  FULL pipeline (attach helper)        mean=   0.622ms median=   0.608ms p90=   0.657ms p99=   0.875ms min=   0.597ms  max=   0.875ms
+  json.dumps response (baseline cost)  mean=   0.004ms median=   0.004ms p90=   0.004ms p99=   0.004ms min=   0.004ms  max=   0.004ms
+
+=== typical (user_chars=1,000, assistant_chars=512) ===
+  raw JSON sizes:  request=1,225B  response=1,054B
+  projected sizes: request=1,225B  response=1,054B
+  project_request                      mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  project_response                     mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  sign_openai_chat_turn                mean=   0.609ms median=   0.596ms p90=   0.604ms p99=   0.863ms min=   0.588ms  max=   0.863ms
+  FULL pipeline (manual envelope)      mean=   0.638ms median=   0.613ms p90=   0.875ms p99=   0.880ms min=   0.603ms  max=   0.880ms
+  FULL pipeline (attach helper)        mean=   0.685ms median=   0.670ms p90=   0.676ms p99=   0.983ms min=   0.659ms  max=   0.983ms
+  json.dumps response (baseline cost)  mean=   0.006ms median=   0.006ms p90=   0.006ms p99=   0.006ms min=   0.005ms  max=   0.006ms
+
+=== 5K user (user_chars=5,000, assistant_chars=512) ===
+  raw JSON sizes:  request=5,225B  response=1,056B
+  projected sizes: request=5,225B  response=1,056B
+  project_request                      mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  project_response                     mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  sign_openai_chat_turn                mean=   0.646ms median=   0.611ms p90=   0.873ms p99=   0.902ms min=   0.603ms  max=   0.902ms
+  FULL pipeline (manual envelope)      mean=   0.636ms median=   0.623ms p90=   0.632ms p99=   0.889ms min=   0.617ms  max=   0.889ms
+  FULL pipeline (attach helper)        mean=   0.646ms median=   0.627ms p90=   0.764ms p99=   0.896ms min=   0.616ms  max=   0.896ms
+  json.dumps response (baseline cost)  mean=   0.004ms median=   0.004ms p90=   0.005ms p99=   0.006ms min=   0.004ms  max=   0.006ms
+
+=== 20K user (user_chars=20,000, assistant_chars=512) ===
+  raw JSON sizes:  request=20,225B  response=1,056B
+  projected sizes: request=20,225B  response=1,056B
+  project_request                      mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  project_response                     mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  sign_openai_chat_turn                mean=   0.670ms median=   0.657ms p90=   0.666ms p99=   0.918ms min=   0.649ms  max=   0.918ms
+  FULL pipeline (manual envelope)      mean=   0.687ms median=   0.674ms p90=   0.681ms p99=   0.952ms min=   0.663ms  max=   0.952ms
+  FULL pipeline (attach helper)        mean=   0.698ms median=   0.672ms p90=   0.936ms p99=   0.937ms min=   0.664ms  max=   0.937ms
+  json.dumps response (baseline cost)  mean=   0.004ms median=   0.004ms p90=   0.005ms p99=   0.005ms min=   0.004ms  max=   0.005ms
+
+=== 50K user (user_chars=50,000, assistant_chars=512) ===
+  raw JSON sizes:  request=50,225B  response=1,058B
+  projected sizes: request=50,225B  response=1,058B
+  project_request                      mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  project_response                     mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  sign_openai_chat_turn                mean=   0.766ms median=   0.755ms p90=   0.769ms p99=   1.010ms min=   0.742ms  max=   1.010ms
+  FULL pipeline (manual envelope)      mean=   0.794ms median=   0.767ms p90=   1.030ms p99=   1.042ms min=   0.760ms  max=   1.042ms
+  FULL pipeline (attach helper)        mean=   0.776ms median=   0.765ms p90=   0.773ms p99=   1.022ms min=   0.753ms  max=   1.022ms
+  json.dumps response (baseline cost)  mean=   0.005ms median=   0.004ms p90=   0.006ms p99=   0.011ms min=   0.004ms  max=   0.011ms
+
+=== 100K user (user_chars=100,000, assistant_chars=512) ===
+  raw JSON sizes:  request=100,225B  response=1,058B
+  projected sizes: request=100,225B  response=1,058B
+  project_request                      mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  project_response                     mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  sign_openai_chat_turn                mean=   1.044ms median=   0.981ms p90=   1.187ms p99=   1.260ms min=   0.970ms  max=   1.260ms
+  FULL pipeline (manual envelope)      mean=   1.009ms median=   0.996ms p90=   1.002ms p99=   1.263ms min=   0.985ms  max=   1.263ms
+  FULL pipeline (attach helper)        mean=   1.006ms median=   0.992ms p90=   1.002ms p99=   1.258ms min=   0.978ms  max=   1.258ms
+  json.dumps response (baseline cost)  mean=   0.004ms median=   0.004ms p90=   0.005ms p99=   0.005ms min=   0.004ms  max=   0.005ms
+
+=== 200K user, 32 response (user_chars=200,000, assistant_chars=128) ===
+  raw JSON sizes:  request=200,225B  response=673B
+  projected sizes: request=200,225B  response=673B
+  project_request                      mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  project_response                     mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  sign_openai_chat_turn                mean=   1.327ms median=   1.315ms p90=   1.325ms p99=   1.589ms min=   1.305ms  max=   1.589ms
+  FULL pipeline (manual envelope)      mean=   1.344ms median=   1.336ms p90=   1.343ms p99=   1.581ms min=   1.284ms  max=   1.581ms
+  FULL pipeline (attach helper)        mean=   1.358ms median=   1.334ms p90=   1.577ms p99=   1.609ms min=   1.321ms  max=   1.609ms
+  json.dumps response (baseline cost)  mean=   0.004ms median=   0.004ms p90=   0.004ms p99=   0.005ms min=   0.004ms  max=   0.005ms
+
+=== 200K user, 2K response (user_chars=200,000, assistant_chars=2000) ===
+  raw JSON sizes:  request=200,225B  response=2,541B
+  projected sizes: request=200,225B  response=2,541B
+  project_request                      mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  project_response                     mean=   0.001ms median=   0.001ms p90=   0.001ms p99=   0.001ms min=   0.001ms  max=   0.001ms
+  sign_openai_chat_turn                mean=   1.335ms median=   1.323ms p90=   1.335ms p99=   1.582ms min=   1.314ms  max=   1.582ms
+  FULL pipeline (manual envelope)      mean=   1.435ms median=   1.342ms p90=   1.693ms p99=   2.010ms min=   1.327ms  max=   2.010ms
+  FULL pipeline (attach helper)        mean=   1.350ms median=   1.337ms p90=   1.344ms p99=   1.598ms min=   1.331ms  max=   1.598ms
+  json.dumps response (baseline cost)  mean=   0.006ms median=   0.006ms p90=   0.007ms p99=   0.007ms min=   0.006ms  max=   0.007ms
