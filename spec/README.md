@@ -13,9 +13,11 @@ unittest coverage under `tests`.
 
 Verifier artifact integration is documented in [../docs/artifact.md](../docs/artifact.md).
 
-Note: `llm_sign` does not ship a PKI / CA trust profile. Trust between
-signer and verifier is established by pinning the signer's public key
-out of band (for example reading it from the provider's published TLS
-certificate). The baseline key policy is therefore
-`llm_sign.keys.ed25519.StaticKeyPolicy`; no certification path
-validation is performed.
+Trust between signer and verifier is established by reading the
+signer's public key out of the TLS certificate the provider ships
+alongside its signed response (`llm_sign.certificate_chain`). This
+addresses middleman / relay tampering without introducing a CA or PKI:
+the relay does not hold the provider's private key and cannot forge a
+signature, and the signed `key_id` is an SPKI hash of the certificate
+public key so the certificate cannot be swapped out without breaking
+verification.

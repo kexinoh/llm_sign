@@ -149,12 +149,42 @@ def create_artifact(
     return artifact
 
 
+def attach_signed_artifact_to_openai_response(
+    response: Dict[str, Any],
+    *,
+    artifact: Mapping[str, Any],
+    credential: Optional[TLSCertificateCredential] = None,
+    certificate_chain_pem: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Attach a signed artifact to an OpenAI-compatible response in-place.
+
+    Writes ``response["llm_sign"] = {"artifact": artifact, ...}`` and, if
+    the provider has a TLS credential or PEM chain handy, also attaches
+    ``response["llm_sign"]["certificate_chain"]``. Clients read the
+    provider's signing public key out of that chain — the relay between
+    client and provider cannot forge it because it does not hold the
+    provider's private key, and swapping the chain would cause the
+    signed ``key_id`` to no longer match the leaf public key.
+
+    Returns ``response`` for convenience.
+    """
+
+    llm_sign: Dict[str, Any] = {"artifact": dict(artifact)}
+    if certificate_chain_pem is None and credential is not None:
+        certificate_chain_pem = credential.certificate_chain_pem()
+    if certificate_chain_pem is not None:
+        llm_sign["certificate_chain"] = list(certificate_chain_pem)
+    response["llm_sign"] = llm_sign
+    return response
+
+
 __all__ = [
     "ARTIFACT_SCHEMA",
     "DEFAULT_ISSUER",
     "OPENAI_COMPATIBLE_PLATFORM",
     "PROTOCOL_VERSION",
     "TLSCertificateCredential",
+    "attach_signed_artifact_to_openai_response",
     "create_artifact",
     "create_signer",
     "generate_ed25519_key_pair",

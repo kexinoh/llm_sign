@@ -6,14 +6,14 @@ This package is intended to be embedded by tools such as Codex CLI, Kimi CLI,
 vLLM-compatible servers, and other OpenAI-compatible clients. Providers use
 `llm_sign.vendor`; clients use `llm_sign.client` or the `llm-sign-verify` CLI.
 
-The package does not depend on internal platform logs. Integrations SHOULD emit
-the normalized artifact contract below.
-
-`llm_sign` does not ship a PKI / CA trust chain. Clients establish trust
-by **pinning the provider's transcript-signing public key** out of band.
-When the provider signs with the same private key that terminates its
-TLS endpoint, the public key embedded in its TLS certificate is a
-natural pin.
+The threat model is middleman / relay tampering. A client that talks
+through a relay cannot learn the real provider's public key from its
+own TLS session. `llm_sign` solves this by having the provider sign
+transcripts with the same private key that terminates its own TLS
+endpoint, and ship the corresponding TLS certificate alongside the
+signed response. The client reads the provider's public key out of that
+certificate and verifies the signature directly — no CA trust chain,
+no revocation checks, no PKI.
 
 For vLLM, the provider side can load the same TLS files passed to `vllm serve`:
 
@@ -50,8 +50,8 @@ payloads  Optional seq-indexed payload object. Overrides missing turn payloads.
 
 ## OpenAI-Compatible Response Envelope
 
-For OpenAI-compatible APIs, a signed response can carry the artifact under a
-provider extension field:
+For OpenAI-compatible APIs, a signed response carries both the artifact
+and the provider's TLS certificate under a provider extension field:
 
 ```json
 {
@@ -72,19 +72,23 @@ provider extension field:
 }
 ```
 
-The optional `llm_sign.certificate_chain` is a convenience field: a
-place for the provider to publish its TLS certificate so a client can
-read the public key out of it on first use. It is **discovery material
-only** and is not signed. `llm_sign` does not validate it, does not
-walk it to a trust anchor, and does not consult revocation sources.
+`llm_sign.certificate_chain` is an ordered PEM certificate list with the
+provider transcript-signing certificate first. The client extracts the
+provider's public key from the leaf certificate and verifies the
+signature against it. The field is **not** a trust chain — no CA
+validation, no revocation check is performed. Tampering is prevented by
+the signed `key_id` field: a relay that swaps the certificate would
+cause `key_id` to no longer match the new leaf's SPKI, so verification
+fails.
 
-Clients that must keep working with providers that do not yet support this
-extension can call `llm_sign.client.verify_openai_response_signature(...)`.
-That helper returns a report with `has_signature`, `host_name`, and `valid`.
+Clients that want to keep working with providers that do not yet
+support this extension can call
+`llm_sign.client.verify_openai_response_signature(...)`. That helper
+returns a report with `has_signature`, `host_name`, and `valid`.
 Unsigned responses produce `has_signature: false` and `valid: null`;
-signed responses verified against a pinned `public_key` produce
-`valid: true` or `valid: false`; signed responses without a pinned
-public key produce `valid: null` (nothing to verify against).
+signed responses with an embedded provider certificate produce
+`valid: true / false`; a signed response that cannot be verified (no
+embedded certificate and no pinned public key) produces `valid: false`.
 
 ## Turn Payloads
 

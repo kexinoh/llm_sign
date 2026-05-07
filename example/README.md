@@ -3,11 +3,18 @@
 These examples show how to verify OpenAI-compatible signed transcript
 artifacts with the public `llm_sign.client.*` APIs.
 
-**Trust model.** `llm_sign` does not implement a PKI / CA trust chain.
-A client verifies a provider by **pinning the provider's transcript
-signing public key** out of band — exactly the same public key that is
-embedded in the provider's TLS certificate. The examples below take
-that pinned public key and verify signatures against it.
+**Trust model.** The threat is relay / middleman tampering. The client's
+own HTTPS session only authenticates whichever relay it talks to, so
+the client cannot read the real provider's public key from its TLS
+handshake. Instead, the provider ships its TLS certificate inside the
+signed response itself, at `llm_sign.certificate_chain`. The client
+reads the signing public key out of that certificate and verifies the
+artifact against it.
+
+A relay cannot forge a valid signature because it does not hold the
+provider's private key; swapping the embedded certificate would cause
+the signed `key_id` to no longer match the leaf public key, so
+verification also fails.
 
 ## Setup
 
@@ -26,8 +33,8 @@ export OPENAI_API_KEY="..."
 
 ## Offline verification
 
-Runs without network access and verifies a bundled signed OpenAI Chat
-Completions response against a bundled pinned public key:
+Runs without network access. The bundled response carries the
+provider's certificate inline; the verifier uses it automatically:
 
 ```sh
 python3 example/offline_openai_chat_verify.py
@@ -37,27 +44,21 @@ python3 example/offline_openai_chat_verify.py
 
 Calls `client.chat.completions.create(...)` and passes the OpenAI SDK
 response directly to
-`llm_sign.client.verify_openai_response_signature(...)`. Verification is
-optional: if the response has no `llm_sign.artifact`, the example still
-prints the assistant message and returns success. If a pinned public
-key is provided via `OPENAI_PUBLIC_KEY`, the example verifies the
-signature against it; without a pinned key, the report marks
-`valid=None` ("signed, but nothing to check it against").
+`llm_sign.client.verify_openai_response_signature(...)`. No keys or
+certificates need to be configured on the client side. If the response
+has no `llm_sign.artifact`, the example still prints the assistant
+message and returns success.
 
 The verification report always includes:
 
 - `has_signature`: whether the response carried `llm_sign.artifact`.
 - `host_name`: the issuer claimed by the signed blocks, or `null`.
 - `valid`: `true` for a valid signature, `false` for a bad signature,
-  and `null` when there was no signature to verify or no pinned key.
+  and `null` when there was no signature to verify.
 
 ```sh
-OPENAI_PUBLIC_KEY=./provider-cert.pem \
-  python3 example/openai_client_verify.py
+python3 example/openai_client_verify.py
 ```
-
-`OPENAI_PUBLIC_KEY` accepts either a PEM public key or a PEM
-certificate (the certificate's public key is used).
 
 Optional model override:
 

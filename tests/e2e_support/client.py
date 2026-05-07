@@ -5,7 +5,13 @@ from urllib import request as urllib_request
 
 from llm_sign import ChainVerification
 from llm_sign.blocks import PROVIDER_OUTPUT, PROVIDER_RECEIVED_INPUT, TOOL_RESULT
-from llm_sign.client import StaticKeyPolicy, verify_artifact
+from llm_sign.client import (
+    StaticKeyPolicy,
+    artifact_from_openai_response,
+    public_key_from_openai_response,
+    verify_artifact,
+    verify_openai_response_with_public_key,
+)
 
 from tests.e2e_support.constants import ISSUER, SUITE_ID
 
@@ -72,6 +78,60 @@ class SignedChatClient:
             artifact,
             key_policy=self.key_policy,
             payloads=verification_payloads or None,
+        )
+
+    def _post_json(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request = urllib_request.Request(
+            self.endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib_request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _payloads_for_artifact(
+        self,
+        artifact: Mapping[str, Any],
+        request: Mapping[str, Any],
+        response: Mapping[str, Any],
+    ) -> dict[int, Any]:
+        return _payloads_for_artifact(self._payloads, artifact, request, response)
+
+
+class EmbeddedCertificateSignedChatClient:
+    """Client that reads the provider public key from the response itself.
+
+    The response is expected to carry the provider's TLS certificate at
+    ``llm_sign.certificate_chain`` (leaf first). The client extracts the
+    public key from the leaf certificate and uses it to verify the
+    signed artifact. No CA / PKI validation is performed: trust in the
+    certificate comes from the fact that a relay cannot forge a
+    signature with the provider's private key.
+    """
+
+    def __init__(self, *, endpoint: str) -> None:
+        self.endpoint = endpoint
+        self._payloads = {}
+
+    def create_chat_completion(self, request: Mapping[str, Any]) -> VerifiedChatCompletion:
+        response = self._post_json(request)
+        artifact = artifact_from_openai_response(response)
+        signed_response = artifact["turns"][-1]["response"]
+        payloads = self._payloads_for_artifact(artifact, request, signed_response)
+        public_key = public_key_from_openai_response(response)
+        verification = verify_openai_response_with_public_key(
+            response,
+            public_key=public_key,
+            payloads=payloads,
+        )
+        if verification.valid:
+            self._payloads = payloads
+        return VerifiedChatCompletion(
+            artifact=artifact,
+            response=signed_response,
+            verification=verification,
         )
 
     def _post_json(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:

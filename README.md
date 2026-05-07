@@ -8,8 +8,7 @@
 provider attach a provider-signed transcript to every OpenAI-compatible
 response, so a downstream client can verify, end-to-end, that the
 request it sent and the response it got back have not been tampered
-with on the wire — and that they came from a specific provider
-identity.
+with on the wire — even when a relay sits between them.
 
 - Zero impact when disabled. Unsigned responses stay byte-identical to
   upstream.
@@ -18,22 +17,31 @@ identity.
 - Transport-agnostic. The signature lives in the response JSON, so it
   survives HTTPS relays, proxies, and gateways.
 
-## Trust model
+## Threat model and trust
 
-`llm_sign` does **not** ship a PKI / CA trust chain. Instead, it
-reuses the SSL material the provider already has on disk:
+The threat is a middleman / relay that sits between the client and the
+real LLM provider (for example a paid gateway or an API aggregator).
+The client's own HTTPS session only authenticates the **relay**, not
+the provider, so a plain TLS connection cannot tell the client whether
+the request actually reached the provider or whether the response was
+tampered with along the way.
 
-- The provider signs transcripts with the same private key that
-  terminates its TLS endpoint (for example the file passed to vLLM as
-  `--ssl-keyfile`).
-- The client **pins the provider's public key** out of band — for
-  example by reading it from the provider's published TLS certificate
-  — and verifies signatures directly against that pinned key.
+`llm_sign` closes this gap by having the provider sign every turn with
+the private key that terminates its own TLS endpoint, and **embed its
+TLS certificate in the signed response** at
+`response["llm_sign"]["certificate_chain"]`. The client reads the
+provider's public key straight out of that certificate and uses it to
+verify the artifact.
 
-There is no certification path validation, no trust anchor store, no
-CRL / OCSP, and no certificate extension introspection inside
-`llm_sign`. A provider's certificate is used purely as a convenient
-container for its public key and host name.
+- The relay cannot forge a signature because it does not hold the
+  provider's private key.
+- The relay cannot substitute a different certificate either: the
+  signed `key_id` field is an SPKI hash of the public key that signed
+  the blocks, so any replacement certificate whose public key does not
+  match that hash fails verification.
+
+There is **no PKI / CA trust chain** in `llm_sign`. The certificate is
+used purely as a transport for the provider's public key.
 
 ## Install
 
@@ -43,30 +51,16 @@ pip install llm-sign
 
 ## Quickstart (client): verify a signed response
 
-You called an OpenAI-compatible endpoint that supports `llm_sign`. Its
-response JSON carries an extra `llm_sign` field. With just the
-provider's public key, you can verify the entire request/response pair
-in one call:
+The provider ships its certificate inside the response. The client has
+nothing to configure:
 
 ```python
 import json
-from llm_sign.client import (
-    load_pem_certificates,
-    verify_openai_response_with_public_key,
-)
+import llm_sign
 
-# The provider's certificate (or a PEM public key file). Only the
-# public key is used; llm_sign does not validate the certificate.
-with open("provider-cert.pem") as f:
-    public_key = load_pem_certificates(f.read())[0].public_key()
+response = json.loads(http_body)  # raw response from the (possibly relayed) endpoint
 
-# The raw HTTP response body from the provider.
-response = json.loads(http_body)
-
-result = verify_openai_response_with_public_key(
-    response,
-    public_key=public_key,
-)
+result = llm_sign.client.verify_openai_response(response)
 
 if result.valid:
     print("authentic:", response["choices"][0]["message"]["content"])
@@ -77,8 +71,8 @@ else:
 **What this actually checks.** The signed payload covers both the
 request (what you asked) and the response (what the model said).
 Mutating a single character of either side — the user prompt, the
-assistant content, the model name, the temperature — flips `valid`
-to `False`.
+assistant content, the model name, the temperature — or swapping the
+embedded provider certificate flips `valid` to `False`.
 
 ### Works with older providers too
 
@@ -86,14 +80,29 @@ Not every endpoint signs responses. For clients that want to accept
 both signed and unsigned providers, use the non-raising variant:
 
 ```python
-from llm_sign.client import verify_openai_response_signature
-
-report = verify_openai_response_signature(response, public_key=public_key)
+report = llm_sign.client.verify_openai_response_signature(response)
 
 report.has_signature   # True  / False
 report.host_name       # provider host name, if signed
-report.valid           # True / False / None
-                       # None = nothing to verify (unsigned, or no pinned key)
+report.valid           # True / False / None (None = no signature to check)
+```
+
+### Pinning a known provider key (TOFU)
+
+If you want to lock the client to a specific provider identity across
+sessions — i.e. not trust whatever certificate a future response might
+carry — pin the public key the first time you see it:
+
+```python
+from llm_sign.client import (
+    public_key_from_openai_response,
+    verify_openai_response_with_public_key,
+)
+
+pinned = public_key_from_openai_response(first_response)  # extract once
+# ... store pinned ...
+
+result = verify_openai_response_with_public_key(later_response, public_key=pinned)
 ```
 
 ## Quickstart (provider): sign a response
@@ -116,47 +125,17 @@ artifact = llm_sign.server.sign_openai_chat_turn(
     signer=signer,
 )
 
-# Attach to the HTTP response that goes on the wire:
-response_dict["llm_sign"] = {"artifact": artifact}
+# Attach the artifact plus the provider certificate to the HTTP response:
+llm_sign.server.attach_signed_artifact_to_openai_response(
+    response_dict,
+    artifact=artifact,
+    credential=credential,
+)
 ```
 
 The issuer (provider identity claimed in the signature) is derived
 from your certificate's SAN/CN, so it matches your TLS server name
 automatically. RSA, P-256 ECDSA, and Ed25519 keys are all supported.
-
-Optionally include `credential.certificate_chain_pem()` under
-`llm_sign.certificate_chain` in the response so clients have a
-convenient place to read the provider public key from. The field is
-**discovery material only** — `llm_sign` does not build a trust chain
-from it; clients still verify against a pinned public key.
-
-### Just want to play without a real cert?
-
-```python
-import llm_sign
-
-keys = llm_sign.server.generate_ed25519_key_pair()
-signer = llm_sign.server.create_signer(
-    issuer="demo.local",
-    key_id=keys.key_id,
-    private_key=keys.private_key,
-)
-
-artifact = llm_sign.server.sign_openai_chat_turn(
-    request={"model": "demo", "messages": [{"role": "user", "content": "hi"}]},
-    response={"model": "demo", "choices": [
-        {"index": 0, "finish_reason": "stop",
-         "message": {"role": "assistant", "content": "Hello."}},
-    ]},
-    signer=signer,
-)
-
-# Verify with the matching public key.
-result = llm_sign.client.verify_with_public_key(
-    artifact, public_key=keys.public_key,
-)
-assert result.valid, result.errors
-```
 
 ## Using llm_sign with vLLM
 
@@ -181,14 +160,14 @@ client breakage.
 
 ## Command-line verifier
 
+For offline / audit use, the CLI takes a pinned public key (or a PEM
+certificate whose public key is used):
+
 ```sh
 llm-sign-verify artifact.json \
   --issuer api.example.com \
   --public-key provider-cert.pem
 ```
-
-`--public-key` accepts either a PEM/DER public key or a PEM
-certificate (the certificate's public key is extracted and used).
 
 ## Protocol and versioning
 

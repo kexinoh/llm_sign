@@ -1,15 +1,35 @@
 """Client-side verifier APIs for CLI and platform integrations.
 
-``llm_sign`` does not ship a CA / PKI trust model. Clients establish
-trust in a provider by pinning the provider's public key out of band
-(for example from the same TLS certificate the provider serves). The
-helpers in this module all expect such a pinned public key.
+Trust model
+-----------
+
+``llm_sign`` does not ship a PKI / CA trust model. The threat model is
+middleman / relay tampering: a client talks to a relay over HTTPS, and
+the relay talks to the real provider. The client's TLS session only
+authenticates the relay, so the client cannot learn the provider's
+public key from its own TLS handshake.
+
+By convention the provider returns its TLS certificate alongside the
+signed transcript, in ``llm_sign.certificate_chain``. The client reads
+the provider's public key out of that certificate (no CA / path
+validation is performed) and uses it to verify the transcript. Tampering
+by the relay is detected because any mutation of the request, response,
+or transcript would invalidate the signature that was produced with the
+provider's private key.
+
+A client that already knows the provider's public key can pin it
+directly via :func:`verify_with_public_key` /
+:func:`verify_openai_response_with_public_key`; this is equivalent to
+trusting-on-first-use the certificate that shipped with the first
+response.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
+
+from cryptography import x509
 
 from llm_sign.core.blocks import ChainVerification
 from llm_sign.core.crypto import infer_suite_for_public_key
@@ -120,6 +140,100 @@ def verify_openai_response_with_public_key(
     )
 
 
+def certificate_chain_from_openai_response(
+    response: Mapping[str, Any],
+    *,
+    required: bool = True,
+) -> Optional[List[x509.Certificate]]:
+    """Extract the provider's PEM certificate chain from an OpenAI response.
+
+    The provider is expected to attach its TLS certificate chain at
+    ``response["llm_sign"]["certificate_chain"]`` (leaf first). This is
+    the channel the client uses to learn the provider's public key when
+    the TLS session only authenticates an intermediary relay.
+
+    The chain is parsed but **not** validated against any trust anchor;
+    ``llm_sign`` treats the certificate purely as a container for the
+    signing public key. If ``required`` is ``False`` and the field is
+    absent, ``None`` is returned.
+    """
+
+    llm_sign = response.get("llm_sign")
+    if not isinstance(llm_sign, Mapping):
+        if required:
+            raise ValueError("OpenAI response must include llm_sign.certificate_chain")
+        return None
+
+    raw_chain = llm_sign.get("certificate_chain")
+    if raw_chain is None:
+        artifact = llm_sign.get("artifact")
+        if isinstance(artifact, Mapping):
+            raw_chain = artifact.get("certificate_chain")
+    if raw_chain is None:
+        if required:
+            raise ValueError("OpenAI response must include llm_sign.certificate_chain")
+        return None
+    if not isinstance(raw_chain, list):
+        raise ValueError("llm_sign.certificate_chain must be a list of PEM strings")
+
+    certificates: List[x509.Certificate] = []
+    for pem in raw_chain:
+        if not isinstance(pem, str):
+            raise ValueError("certificate_chain entries must be PEM strings")
+        certificates.extend(load_pem_certificates(pem.encode("ascii")))
+    if not certificates:
+        raise ValueError("certificate_chain must contain at least one certificate")
+    return certificates
+
+
+def public_key_from_openai_response(response: Mapping[str, Any]) -> Any:
+    """Return the provider's signing public key from an OpenAI response.
+
+    Reads ``llm_sign.certificate_chain[0]`` (the provider's leaf
+    certificate) and returns its embedded public key. No CA / path
+    validation is performed: the certificate is used only as a transport
+    for the public key the transcript was signed with.
+    """
+
+    chain = certificate_chain_from_openai_response(response)
+    assert chain is not None  # required=True above
+    return chain[0].public_key()
+
+
+def verify_openai_response(
+    response: Mapping[str, Any],
+    *,
+    issuer: Optional[str] = None,
+    key_id: Optional[str] = None,
+    suite_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    payloads: Optional[Mapping[int, Any]] = None,
+) -> ChainVerification:
+    """Verify an OpenAI response using the provider certificate it carries.
+
+    The signing public key is read from the provider certificate that the
+    response embeds at ``llm_sign.certificate_chain[0]``. This is the
+    standard client path: no PEM files, no TLS trust store, no PKI — the
+    relay cannot forge a signature because it does not have the
+    provider's private key, and substituting the certificate would cause
+    the signed ``key_id`` to no longer match the leaf public key.
+
+    Callers that want to pin a specific issuer identity across sessions
+    should use :func:`verify_openai_response_with_public_key` instead.
+    """
+
+    public_key = public_key_from_openai_response(response)
+    return verify_openai_response_with_public_key(
+        response,
+        public_key=public_key,
+        issuer=issuer,
+        key_id=key_id,
+        suite_id=suite_id,
+        platform=platform,
+        payloads=payloads,
+    )
+
+
 def _first_block_metadata(artifact: Mapping[str, Any]) -> Mapping[str, Any]:
     """Return ``{issuer, key_id, suite_id}`` from the artifact's first block."""
     chain = artifact.get("chain", artifact.get("signed_blocks"))
@@ -176,12 +290,15 @@ def verify_openai_response_signature(
     payloads: Optional[Mapping[int, Any]] = None,
     platform: Optional[str] = None,
 ) -> OpenAIResponseSignatureReport:
-    """Report on a response's signature status.
+    """Non-raising report on a response's signature status.
 
-    Unsigned responses yield ``has_signature=False, valid=None``. Signed
-    responses are verified against ``public_key`` when provided; without a
-    pinned public key the signature cannot be independently verified and
-    ``valid`` is reported as ``None``.
+    - Unsigned responses yield ``has_signature=False, valid=None``.
+    - Signed responses are verified against ``public_key`` when pinned,
+      otherwise against the provider certificate embedded in
+      ``llm_sign.certificate_chain``.
+    - If the signature can neither be pinned nor be read from an
+      embedded provider certificate, ``valid`` is ``False`` (the
+      response claims to be signed but carries nothing to verify against).
     """
 
     response_data = openai_response_to_dict(response)
@@ -194,18 +311,22 @@ def verify_openai_response_signature(
         )
 
     host_name = host_name_from_artifact(artifact)
-    if public_key is None:
-        # Signature is present but we have nothing to verify it against.
-        return OpenAIResponseSignatureReport(
-            has_signature=True,
-            host_name=host_name,
-            valid=None,
-        )
+
+    resolved_public_key = public_key
+    if resolved_public_key is None:
+        try:
+            resolved_public_key = public_key_from_openai_response(response_data)
+        except Exception:
+            return OpenAIResponseSignatureReport(
+                has_signature=True,
+                host_name=host_name,
+                valid=False,
+            )
 
     try:
         verification = verify_with_public_key(
             artifact,
-            public_key=public_key,
+            public_key=resolved_public_key,
             issuer=issuer,
             key_id=key_id,
             suite_id=suite_id,
@@ -299,15 +420,18 @@ __all__ = [
     "OpenAIResponseSignatureReport",
     "StaticKeyPolicy",
     "artifact_from_openai_response",
+    "certificate_chain_from_openai_response",
     "certificate_key_id",
     "host_name_from_artifact",
     "load_pem_certificates",
     "load_signed_blocks",
     "openai_response_signature_summary",
     "openai_response_to_dict",
+    "public_key_from_openai_response",
     "spki_sha256_key_id",
     "trust_public_key",
     "verify_artifact",
+    "verify_openai_response",
     "verify_openai_response_signature",
     "verify_openai_response_with_public_key",
     "verification_summary",

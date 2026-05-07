@@ -1,8 +1,9 @@
 """Static signed OpenAI-compatible response used by examples.
 
-The fixture pairs a signed artifact with the Ed25519 public key that
-signs it. Verification in the examples is performed by pinning that
-public key directly; ``llm_sign`` does not use any CA / PKI trust chain.
+The fixture ships both the signed artifact and the provider's TLS
+certificate (at ``llm_sign.certificate_chain``). The client verifies
+the artifact by reading the signing public key out of that certificate.
+No CA / PKI validation is performed.
 """
 
 from __future__ import annotations
@@ -11,21 +12,21 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from cryptography.hazmat.primitives import serialization
 
-
-# Ed25519 public key that signs the bundled artifact below. Clients
-# "pin" it out of band exactly as they would pin a provider's
-# TLS-served public key in a real deployment.
-SUPPLIER_PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=
------END PUBLIC KEY-----
-"""
-
-
-def load_supplier_public_key() -> Any:
-    return serialization.load_pem_public_key(SUPPLIER_PUBLIC_KEY_PEM.encode("ascii"))
-
+# Provider self-signed Ed25519 certificate. Its embedded public key is
+# the one that produced the signatures in the artifact below, so the
+# signed ``key_id`` matches ``spki-sha256(certificate public key)``.
+SUPPLIER_CERTIFICATE_CHAIN_PEM = [
+    """-----BEGIN CERTIFICATE-----
+MIIBAzCBtqADAgECAgEBMAUGAytlcDAbMRkwFwYDVQQDDBBwcm92aWRlci5leGFt
+cGxlMB4XDTI0MDEwMTAwMDAwMFoXDTQ0MDEwMTAwMDAwMFowGzEZMBcGA1UEAwwQ
+cHJvdmlkZXIuZXhhbXBsZTAqMAUGAytlcAMhAAOhB7/zzhC+HXDdGOdLwJln5NYw
+m6UNXx3chmQSVTG4ox8wHTAbBgNVHREEFDASghBwcm92aWRlci5leGFtcGxlMAUG
+AytlcANBAA4qX4NimZAdNgpxktWMc/j5aHVLTzdyU/lb+mEpJkkJdikSl1nUC1S2
+syU81pYjaIjuRoC3I5HyFBjkjMsdnQc=
+-----END CERTIFICATE-----
+""",
+]
 
 SIGNED_CHAT_COMPLETION = json.loads(
     """
@@ -117,6 +118,8 @@ SIGNED_CHAT_COMPLETION = json.loads(
 }
 """
 )
+
+SIGNED_CHAT_COMPLETION["llm_sign"]["certificate_chain"] = SUPPLIER_CERTIFICATE_CHAIN_PEM
 
 
 def assistant_message(response: Mapping[str, Any]) -> str:

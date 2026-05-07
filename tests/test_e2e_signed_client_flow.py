@@ -1,15 +1,24 @@
 from copy import deepcopy
+import datetime as dt
 import unittest
 
-from llm_sign import Ed25519KeyPair, PayloadState
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import NameOID
+from llm_sign import Ed25519KeyPair, PayloadState, TranscriptSigner
 from llm_sign.blocks import PROVIDER_OUTPUT, PROVIDER_RECEIVED_INPUT, TOOL_RESULT
 from llm_sign.client import (
     openai_response_signature_summary,
     openai_response_to_dict,
     verify_openai_response_signature,
 )
+from llm_sign.keys.tls import certificate_key_id
 
-from tests.e2e_support.client import SignedChatClient
+from tests.e2e_support.client import (
+    EmbeddedCertificateSignedChatClient,
+    SignedChatClient,
+)
 from tests.e2e_support.constants import ISSUER, NUMBER_COUNT, RESPONSE_ID
 from tests.e2e_support.payloads import (
     build_chat_request,
@@ -572,6 +581,84 @@ class E2ESignedClientFlowTests(unittest.TestCase):
         self.assertEqual(summary["host_name"], ISSUER)
         self.assertIsNone(summary["valid"])
 
+    def test_relay_response_with_embedded_provider_certificate_verifies_end_to_end(self):
+        """Provider ships its TLS cert in the first response; client verifies against it."""
+
+        request = build_chat_request()
+        supplier_key, supplier_cert = _supplier_server_cert(ISSUER)
+
+        with SignedChatHttpServer(
+            response_mode="openai-compatible",
+            signer=_supplier_signer(supplier_key, supplier_cert),
+            certificate_chain=[supplier_cert],
+        ) as supplier:
+            with JsonProxyHttpServer(target_base_url=supplier.openai_base_url) as relay:
+                client = EmbeddedCertificateSignedChatClient(
+                    endpoint=relay.chat_completions_url,
+                )
+                completion = client.create_chat_completion(request)
+
+        self.assertTrue(completion.verification.valid, completion.verification.errors)
+        self.assertEqual(
+            [block.payload_state for block in completion.verification.blocks],
+            [PayloadState.PAYLOAD_VERIFIED, PayloadState.PAYLOAD_VERIFIED],
+        )
+        self.assertEqual(
+            completion.artifact["chain"][0]["block"]["key_id"],
+            certificate_key_id(supplier_cert),
+        )
+
+    def test_relay_swapping_embedded_certificate_breaks_verification(self):
+        """A relay that replaces the provider cert cannot forge a valid signature."""
+
+        request = build_chat_request()
+        supplier_key, supplier_cert = _supplier_server_cert(ISSUER)
+        _, evil_cert = _supplier_server_cert(ISSUER)
+
+        with SignedChatHttpServer(
+            response_mode="openai-compatible",
+            signer=_supplier_signer(supplier_key, supplier_cert),
+            certificate_chain=[supplier_cert],
+        ) as supplier:
+            with JsonProxyHttpServer(
+                target_base_url=supplier.openai_base_url,
+                response_mutator=lambda response: _replace_supplier_certificate_chain(
+                    response, [evil_cert]
+                ),
+            ) as relay:
+                client = EmbeddedCertificateSignedChatClient(
+                    endpoint=relay.chat_completions_url,
+                )
+                completion = client.create_chat_completion(request)
+
+        self.assertFalse(completion.verification.valid)
+        self.assertTrue(completion.verification.errors)
+        self.assertTrue(
+            completion.verification.errors[0].startswith("seq 0:"),
+            completion.verification.errors,
+        )
+
+    def test_relay_dropping_embedded_certificate_raises_on_verify(self):
+        """A response that lost its provider cert cannot be verified."""
+
+        request = build_chat_request()
+        supplier_key, supplier_cert = _supplier_server_cert(ISSUER)
+
+        with SignedChatHttpServer(
+            response_mode="openai-compatible",
+            signer=_supplier_signer(supplier_key, supplier_cert),
+            certificate_chain=[supplier_cert],
+        ) as supplier:
+            with JsonProxyHttpServer(
+                target_base_url=supplier.openai_base_url,
+                response_mutator=_drop_supplier_certificate_chain,
+            ) as relay:
+                client = EmbeddedCertificateSignedChatClient(
+                    endpoint=relay.chat_completions_url,
+                )
+                with self.assertRaisesRegex(ValueError, "certificate_chain"):
+                    client.create_chat_completion(request)
+
     def _client(self, server: SignedChatHttpServer) -> SignedChatClient:
         return SignedChatClient(
             endpoint=server.chat_completions_url,
@@ -670,6 +757,52 @@ def _chain_index_for_seq(artifact, seq):
         if signed["block"]["seq"] == seq:
             return index
     raise AssertionError(f"missing chain block for seq {seq}")
+
+
+def _supplier_server_cert(dns_name):
+    """Self-signed Ed25519 cert used purely as a public-key container.
+
+    There is no CA in this project. The certificate is how the provider
+    publishes its signing public key to the client; trust is established
+    by the fact that the relay cannot forge a signature under the
+    provider's private key.
+    """
+    key = Ed25519PrivateKey.generate()
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, dns_name)])
+    now = dt.datetime.now(dt.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=30))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
+        .sign(private_key=key, algorithm=None)
+    )
+    return key, cert
+
+
+def _supplier_signer(supplier_key, supplier_cert):
+    return TranscriptSigner(
+        issuer=ISSUER,
+        key_id=certificate_key_id(supplier_cert),
+        private_key=supplier_key,
+    )
+
+
+def _replace_supplier_certificate_chain(response, certificate_chain):
+    response["llm_sign"]["certificate_chain"] = [
+        certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
+        for certificate in certificate_chain
+    ]
+    return response
+
+
+def _drop_supplier_certificate_chain(response):
+    response["llm_sign"].pop("certificate_chain", None)
+    return response
 
 
 if __name__ == "__main__":
