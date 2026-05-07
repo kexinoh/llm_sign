@@ -4,6 +4,47 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/llm-sign.svg)](https://pypi.org/project/llm-sign/)
 [![License](https://img.shields.io/pypi/l/llm-sign.svg)](https://github.com/kexinoh/llm_sign/blob/master/LICENSE)
 
+## What we are doing (and why)
+
+**一句话：我们在防止 LLM API 的"中转站 / relay / 聚合网关"偷偷替换模型、
+篡改响应内容，或者伪造一次根本没发生过的对话。**
+
+今天绝大多数调用 LLM 的链路都是：
+
+```
+你的客户端  ──HTTPS──▶  中转站 / 网关 / 聚合商  ──HTTPS──▶  真正的模型提供方 (例如 vLLM)
+```
+
+你的 HTTPS 只能证明"我确实连到了中转站"，**完全无法证明**：
+
+- 中转站有没有把你指定的 `gpt-x-large` 悄悄换成一个更便宜的小模型再把结果返回给你；
+- 中转站有没有在响应里改几个字、删几段内容、或者直接重写答案；
+- 中转站返回的这条响应，是不是它自己编的、根本没去问过真正的 provider；
+- 你发出去的 request，到达 provider 时是不是还是原样。
+
+**`llm_sign` 要解决的就是这件事。** 做法是：
+
+1. 真正的模型提供方（provider）用它**自己的 TLS 私钥**，对每一轮
+   `(request, response)` 做端到端签名，把签名和自己的 **TLS 证书链**
+   一起塞进响应 JSON 的 `response["llm_sign"]` 字段里。
+2. 客户端拿到响应后，用**和浏览器验 HTTPS 服务器证书完全一样的标准
+   X.509 路径校验**（系统 TLS 根证书 + SAN 匹配）去验那条证书链，
+   然后用验证过的叶子证书公钥去验签 transcript。
+3. 中转站**不持有** provider 的 TLS 私钥，所以它：
+   - 改不了内容（一改签名就挂）；
+   - 换不了模型（响应里的模型名 / 输出都在签名覆盖范围内）；
+   - 伪造不了一条"provider 的响应"（签不出合法签名）；
+   - 换不了证书（签名里的 `key_id` 是公钥 SPKI-SHA256，和叶子证书交叉绑死）。
+
+注意我们**没有**发明新的 PKI、没有自建 CA、没有自定义 OID / EKU。
+信任根就是系统里那套 Web PKI 根证书——provider 只要有一张正常的
+HTTPS 证书（Let's Encrypt 之类都行），客户端默认配置就能验。
+
+一句话版威胁模型 + 完整协议写在
+[`spec/provider-certificate-binding.md`](spec/provider-certificate-binding.md)。
+
+---
+
 **Cryptographic provenance for LLM responses.** `llm_sign` lets an LLM
 provider attach a provider-signed transcript to every OpenAI-compatible
 response, so a downstream client can verify, end-to-end, that the
