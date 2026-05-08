@@ -131,10 +131,14 @@ class SignedBlock:
     signature: bytes
 
     def to_dict(self) -> Dict[str, Any]:
+        # Note: ``block_digest`` is intentionally not emitted on the wire.
+        # It is a deterministic function of ``block.encode()``, every
+        # honest verifier recomputes it from scratch (and trusts only
+        # that recomputation, not anything sent alongside), so echoing
+        # it on the wire would just be ~60 bytes of padding per block.
         return {
             "block": self.block.to_dict(),
             "signature": b64url_encode(self.signature),
-            "block_digest": b64url_encode(self.block.digest()),
         }
 
     @classmethod

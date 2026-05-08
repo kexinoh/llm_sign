@@ -162,13 +162,21 @@ class VerifyWithPublicKeyMetadataInferenceTests(unittest.TestCase):
 
     def test_explicit_metadata_still_works(self):
         # Backward compatibility: passing them all works as before.
+        # ``issuer``/``key_id``/``suite_id`` live in the shared
+        # ``common`` block (one copy per chain rather than one per
+        # block). Extension profiles that produce mixed-issuer chains
+        # would keep them per-block. We read from both for robustness.
+        common = self.artifact.get("common") or {}
         b0 = self.artifact["chain"][0]["block"]
+        issuer = b0.get("issuer", common.get("issuer"))
+        key_id = b0.get("key_id", common.get("key_id"))
+        suite_id = b0.get("suite_id", common.get("suite_id"))
         result = verify_with_public_key(
             self.artifact,
             public_key=self.public_key,
-            issuer=b0["issuer"],
-            key_id=b0["key_id"],
-            suite_id=b0["suite_id"],
+            issuer=issuer,
+            key_id=key_id,
+            suite_id=suite_id,
             platform=self.artifact.get("platform"),
         )
         self.assertTrue(result.valid, msg=result.errors)

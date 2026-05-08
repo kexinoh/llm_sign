@@ -350,7 +350,12 @@ def verify_openai_response(
 
 
 def _first_block_metadata(artifact: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return ``{issuer, key_id, suite_id}`` from the artifact's first block."""
+    """Return ``{issuer, key_id, suite_id}`` from the artifact's first block.
+
+    Looks first at ``artifact.common``, falling back to the per-block
+    dict if a field isn't hoisted (extension profile that legitimately
+    mixes values across blocks).
+    """
     chain = artifact.get("chain", artifact.get("signed_blocks"))
     if not isinstance(chain, list) or not chain:
         return {}
@@ -360,9 +365,12 @@ def _first_block_metadata(artifact: Mapping[str, Any]) -> Mapping[str, Any]:
     block = first.get("block")
     if not isinstance(block, Mapping):
         return {}
+    common = artifact.get("common") if isinstance(artifact.get("common"), Mapping) else {}
     out: Dict[str, Any] = {}
     for k in ("issuer", "key_id", "suite_id"):
         v = block.get(k)
+        if v is None:
+            v = common.get(k)
         if isinstance(v, str):
             out[k] = v
     return out
@@ -380,19 +388,8 @@ def artifact_from_openai_response(response: Mapping[str, Any]) -> Mapping[str, A
 def host_name_from_artifact(artifact: Mapping[str, Any]) -> Optional[str]:
     """Return the host name claimed by the first signed block."""
 
-    chain = artifact.get("chain", artifact.get("signed_blocks"))
-    if not isinstance(chain, list) or not chain:
-        return None
-    signed = chain[0]
-    if not isinstance(signed, Mapping):
-        return None
-    block = signed.get("block")
-    if not isinstance(block, Mapping):
-        return None
-    issuer = block.get("issuer")
-    if not isinstance(issuer, str):
-        return None
-    return issuer
+    issuer = _first_block_metadata(artifact).get("issuer")
+    return issuer if isinstance(issuer, str) else None
 
 
 def verify_openai_response_signature(

@@ -201,8 +201,17 @@ def artifact_terminal_digest(artifact: Mapping[str, Any]) -> Optional[str]:
     terminating block. Downstream integrations can use this as the
     ``parent_hash`` to bind a later turn to this specific artifact.
 
-    Returns ``None`` if the artifact has no chain (malformed input).
+    The digest is recomputed from the block's canonical encoding
+    rather than read from the wire — there is no ``block_digest``
+    field on the wire because it would just be a deterministic copy
+    of what every honest verifier computes for itself anyway.
+
+    Returns ``None`` if the artifact has no chain (malformed input)
+    or the terminal block is malformed.
     """
+
+    from llm_sign.core.base64 import b64url_encode
+    from llm_sign.core.blocks import Block
 
     chain = artifact.get("chain", artifact.get("signed_blocks"))
     if not isinstance(chain, list) or not chain:
@@ -210,8 +219,22 @@ def artifact_terminal_digest(artifact: Mapping[str, Any]) -> Optional[str]:
     last = chain[-1]
     if not isinstance(last, Mapping):
         return None
-    digest = last.get("block_digest")
-    return digest if isinstance(digest, str) else None
+    block_data = last.get("block")
+    if not isinstance(block_data, Mapping):
+        return None
+    # ``artifact.common`` hoists fields that are constant across the
+    # chain; merge them back so ``Block.from_dict`` sees the full
+    # block dict.
+    common = artifact.get("common")
+    if isinstance(common, Mapping):
+        merged = dict(common)
+        merged.update(block_data)
+        block_data = merged
+    try:
+        block = Block.from_dict(block_data)
+        return b64url_encode(block.digest())
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def create_artifact(
@@ -245,8 +268,31 @@ def create_artifact(
             ),
         },
         "platform": platform,
-        "chain": [block.to_dict() for block in chain],
     }
+
+    # Hoist block fields that are constant across the entire chain
+    # into a shared ``common`` envelope. Verifiers merge ``common``
+    # back into each block dict before reconstructing the canonical
+    # block bytes, so the signer's view is unchanged. Per the spec
+    # all five hoisted fields *must* be identical across a
+    # baseline-profile chain (suite/chain_id/issuer/key_id/version),
+    # but we still scan rather than assume — if some future extension
+    # legitimately mixes values within a chain, the field stays per-
+    # block and is not hoisted.
+    signed_dicts = [block.to_dict() for block in chain]
+    block_dicts = [signed["block"] for signed in signed_dicts]
+    common: Dict[str, Any] = {}
+    if block_dicts:
+        for key in ("version", "suite_id", "chain_id", "issuer", "key_id"):
+            values = {b.get(key) for b in block_dicts}
+            if len(values) == 1 and None not in values:
+                common[key] = block_dicts[0][key]
+                for b in block_dicts:
+                    b.pop(key, None)
+    if common:
+        artifact["common"] = common
+    artifact["chain"] = signed_dicts
+
     if turns is not None:
         artifact["turns"] = list(turns)
     if payloads is not None:
