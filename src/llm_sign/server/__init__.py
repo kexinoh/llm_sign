@@ -91,7 +91,6 @@ def sign_openai_chat_turns(
     input_profile = OpenAIChatInputProfile()
     output_profile = OpenAIChatOutputProfile()
     chain: List[SignedBlock] = []
-    artifact_turns: List[Dict[str, Any]] = []
     last_block: Optional[SignedBlock] = None
 
     for request, response in turns:
@@ -108,10 +107,19 @@ def sign_openai_chat_turns(
             previous=input_block,
         )
         chain.extend([input_block, output_block])
-        artifact_turns.append({"request": dict(request), "response": dict(response)})
         last_block = output_block
 
-    return create_artifact(chain=chain, turns=artifact_turns)
+    # Note: we deliberately do NOT echo a copy of (request, response) back
+    # in the artifact (no ``turns`` field). The artifact only carries the
+    # signed chain — block digests and signatures, plus the certificate
+    # chain on the envelope. The user-visible HTTP body is the canonical
+    # source of the request/response bytes; that's what the client
+    # already consumes and pins to the chain's terminating blocks.
+    # Echoing the same bytes a second time inside the envelope would be
+    # ~28% wire overhead with no security benefit; an audit consumer
+    # who wants the original bytes is responsible for keeping the HTTP
+    # envelope (or its top-level fields) alongside the artifact.
+    return create_artifact(chain=chain)
 
 
 def sign_openai_responses_turn(
@@ -179,7 +187,6 @@ def sign_openai_responses_turn(
 
     return create_artifact(
         chain=[input_block, output_block],
-        turns=[{"request": dict(signed_request), "response": dict(response)}],
         platform=OPENAI_RESPONSES_PLATFORM,
     )
 

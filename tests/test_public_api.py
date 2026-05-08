@@ -22,6 +22,13 @@ class PublicApiTests(unittest.TestCase):
             public_key=keys.public_key,
         )
 
+        # Signatures + chain links verify; payloads are reported as
+        # ``digest_only`` because the artifact intentionally no longer
+        # echoes the request/response bytes back (that would just be
+        # transport overhead — see ``server.sign_openai_chat_turn``).
+        # Callers that want full ``payload_verified`` should verify
+        # the HTTP envelope via ``verify_openai_response*`` (which
+        # pins the user-visible body) or pass the payloads explicitly.
         self.assertTrue(result.valid, result.errors)
         self.assertEqual(
             llm_sign.client.verification_summary(result),
@@ -32,15 +39,44 @@ class PublicApiTests(unittest.TestCase):
                     {
                         "seq": 0,
                         "type": PROVIDER_RECEIVED_INPUT,
-                        "payload_state": "payload_verified",
+                        "payload_state": "digest_only",
                     },
                     {
                         "seq": 1,
                         "type": PROVIDER_OUTPUT,
-                        "payload_state": "payload_verified",
+                        "payload_state": "digest_only",
                     },
                 ],
             },
+        )
+
+    def test_client_server_facades_with_explicit_payloads(self):
+        # The same artifact, but the caller supplies the original
+        # request/response so the full payload digest comparison runs.
+        # This is what audit consumers do offline: they kept the
+        # bytes out-of-band, then ask the verifier to check them
+        # against the artifact.
+        keys = llm_sign.server.generate_ed25519_key_pair()
+        signer = llm_sign.server.signer_from_key_pair(keys)
+        request, response = _turn_payload(0)
+
+        artifact = llm_sign.server.sign_openai_chat_turn(
+            request=request,
+            response=response,
+            signer=signer,
+        )
+        result = llm_sign.client.verify_with_public_key(
+            artifact,
+            issuer=llm_sign.server.DEFAULT_ISSUER,
+            key_id=keys.key_id,
+            public_key=keys.public_key,
+            payloads={0: request, 1: response},
+        )
+
+        self.assertTrue(result.valid, result.errors)
+        self.assertEqual(
+            [b.payload_state for b in result.blocks],
+            ["payload_verified", "payload_verified"],
         )
 
     def test_server_facade_signs_multi_turn_artifact(self):

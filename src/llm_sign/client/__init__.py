@@ -748,64 +748,24 @@ def verify_openai_responses_chain(
             )
             break
 
-        # Parent-artifact hash consistency (defence in depth). The
-        # provider injects a server-trusted parent hash into the
-        # current turn's signed input payload as
-        # ``previous_response_hash``. The envelope-level digest check
-        # above already catches a hash mismatch (we injected the
-        # observed parent hash into ``request_for_pinning`` before
-        # calling the verifier — if it disagrees with what the server
-        # signed, the input block's digest won't match). This explicit
-        # comparison exists to produce a more specific error message
-        # than "seq 0: payload digest mismatch", and to detect
-        # legitimate downgrade attempts (signed side None while
-        # observed side has a hash, or vice versa).
-        signed_parent_hash = _signed_previous_response_hash(response_dict)
-        observed_parent_hash = _envelope_artifact_hash(
-            openai_response_to_dict(turns[index - 1]["response"])
-        )
-        if signed_parent_hash != observed_parent_hash:
-            errors.append(
-                f"turn {index}: previous_response_hash mismatch "
-                f"(signed={signed_parent_hash!r}, "
-                f"observed={observed_parent_hash!r}) — parent artifact "
-                "was substituted between signing and verification, or "
-                "one side skipped the hash binding"
-            )
-            break
+        # Parent-artifact hash consistency. The provider injects a
+        # server-trusted parent hash into the current turn's signed
+        # input payload as ``previous_response_hash``. This is bound
+        # by the input block's payload digest, not by any cleartext
+        # field on the envelope, so we don't need (and don't have) a
+        # separate field to compare. We rely on the envelope-level
+        # digest check above: ``request_for_pinning`` is reconstructed
+        # using the parent hash we observed locally, so if that
+        # disagrees with what the server signed, the input block's
+        # digest fails (``seq 0: payload digest mismatch``) and the
+        # turn is reported invalid. That's exactly what cross-session
+        # grafting and store-poisoning attacks look like to the client.
 
     return ResponsesChainVerification(
         valid=not errors,
         errors=errors,
         turns=per_turn_results,
     )
-
-
-def _signed_previous_response_hash(
-    response: Mapping[str, Any],
-) -> Optional[str]:
-    """Return the ``previous_response_hash`` that the provider signed.
-
-    The field lives inside the terminating ``provider_received_input``
-    block's canonical payload. It is present only when the provider
-    injected a server-trusted parent hash at sign time (Responses API
-    only — Chat Completions does not use this field).
-    """
-
-    artifact = _optional_artifact_from_openai_response(response)
-    if artifact is None:
-        return None
-    turns_ = artifact.get("turns")
-    if not isinstance(turns_, list) or not turns_:
-        return None
-    last_turn = turns_[-1]
-    if not isinstance(last_turn, Mapping):
-        return None
-    request = last_turn.get("request") or last_turn.get("input")
-    if not isinstance(request, Mapping):
-        return None
-    value = request.get("previous_response_hash")
-    return value if isinstance(value, str) else None
 
 
 def _envelope_artifact_hash(
