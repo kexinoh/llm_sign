@@ -758,6 +758,26 @@ def verify_openai_responses_chain(
         # turn is reported invalid. That's exactly what cross-session
         # grafting and store-poisoning attacks look like to the client.
 
+        # Cross-turn seq continuity. Each turn ships its own
+        # self-contained 2-block chain, but the seq numbers continue
+        # monotonically across turns within a session: turn N's first
+        # block has ``seq == prior turn's last block seq + 1``. The
+        # value enters the input block's payload digest (it's part
+        # of the ``Block`` canonical encoding), so a mismatch will
+        # already manifest as ``payload digest mismatch`` upstream;
+        # this explicit check just produces a clearer error.
+        prior_last_seq = _last_block_seq(turns[index - 1]["response"])
+        current_first_seq = _first_block_seq(response_dict)
+        if (prior_last_seq is not None
+                and current_first_seq is not None
+                and current_first_seq != prior_last_seq + 1):
+            errors.append(
+                f"turn {index}: seq discontinuity — first block seq "
+                f"{current_first_seq} does not follow prior turn's last "
+                f"seq {prior_last_seq}"
+            )
+            break
+
     return ResponsesChainVerification(
         valid=not errors,
         errors=errors,
@@ -784,6 +804,45 @@ def _previous_turn_response_id(turn: Mapping[str, Any]) -> Optional[str]:
     data = openai_response_to_dict(response)
     value = data.get("id")
     return value if isinstance(value, str) else None
+
+
+def _first_block_seq(response: Mapping[str, Any]) -> Optional[int]:
+    """Return ``response["llm_sign"]["artifact"]["chain"][0]["block"]["seq"]``."""
+
+    artifact = _optional_artifact_from_openai_response(response)
+    if artifact is None:
+        return None
+    chain = artifact.get("chain")
+    if not isinstance(chain, list) or not chain:
+        return None
+    first = chain[0]
+    if not isinstance(first, Mapping):
+        return None
+    block = first.get("block")
+    if not isinstance(block, Mapping):
+        return None
+    seq = block.get("seq")
+    return seq if isinstance(seq, int) else None
+
+
+def _last_block_seq(response: Any) -> Optional[int]:
+    """Return the seq of the last signed block in a response envelope."""
+
+    data = openai_response_to_dict(response)
+    artifact = _optional_artifact_from_openai_response(data)
+    if artifact is None:
+        return None
+    chain = artifact.get("chain")
+    if not isinstance(chain, list) or not chain:
+        return None
+    last = chain[-1]
+    if not isinstance(last, Mapping):
+        return None
+    block = last.get("block")
+    if not isinstance(block, Mapping):
+        return None
+    seq = block.get("seq")
+    return seq if isinstance(seq, int) else None
 
 
 def verification_summary(result: ChainVerification) -> Dict[str, Any]:

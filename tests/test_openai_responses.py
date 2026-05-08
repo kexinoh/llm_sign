@@ -270,7 +270,7 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
         self.keys = Ed25519KeyPair.generate()
         self.signer = signer_from_key_pair(self.keys, issuer=ISSUER)
 
-    def _sign_turn(self, request, response, *, parent_hash=None):
+    def _sign_turn(self, request, response, *, parent_hash=None, start_seq=0):
         projected_request = project_openai_responses_request(request)
         projected_response = project_openai_responses_response(response)
         artifact = sign_openai_responses_turn(
@@ -278,6 +278,7 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
             response=projected_response,
             signer=self.signer,
             parent_hash=parent_hash,
+            start_seq=start_seq,
         )
         envelope = dict(response)
         attach_signed_artifact_to_openai_response(envelope, artifact=artifact)
@@ -296,7 +297,9 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
             "resp_2", previous_response_id="resp_1", text="28"
         )
         env2 = self._sign_turn(
-            req2, resp2, parent_hash=env1["llm_sign"]["artifact_hash"],
+            req2, resp2,
+            parent_hash=env1["llm_sign"]["artifact_hash"],
+            start_seq=2,
         )
 
         result = verify_openai_responses_chain(
@@ -367,7 +370,8 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
             "resp_2a", previous_response_id="resp_1", text="branch a"
         )
         env2_branch_a = self._sign_turn(
-            req2_branch_a, resp2_branch_a, parent_hash=parent_hash,
+            req2_branch_a, resp2_branch_a,
+            parent_hash=parent_hash, start_seq=2,
         )
 
         req2_branch_b = _build_request(previous_response_id="resp_1")
@@ -375,7 +379,8 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
             "resp_2b", previous_response_id="resp_1", text="branch b"
         )
         env2_branch_b = self._sign_turn(
-            req2_branch_b, resp2_branch_b, parent_hash=parent_hash,
+            req2_branch_b, resp2_branch_b,
+            parent_hash=parent_hash, start_seq=2,
         )
 
         branch_a = verify_openai_responses_chain(
@@ -459,7 +464,8 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
         # But the relay actually grafted it onto y1 upstream, so the
         # provider signed with parent_hash = H(y1) instead of H(x1).
         env_x2_grafted = self._sign_turn(
-            req_x2, resp_x2, parent_hash=env_y1["llm_sign"]["artifact_hash"],
+            req_x2, resp_x2,
+            parent_hash=env_y1["llm_sign"]["artifact_hash"], start_seq=2,
         )
 
         # client_X presents its locally observed history (env_x1, the
@@ -508,7 +514,8 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
             "resp_x2", previous_response_id="resp_x1", text="x2 answer"
         )
         env_x2_off_a_poisoned_parent = self._sign_turn(
-            req_x2, resp_x2, parent_hash=phantom_hash,
+            req_x2, resp_x2,
+            parent_hash=phantom_hash, start_seq=2,
         )
 
         result = verify_openai_responses_chain(
@@ -534,11 +541,12 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
         # (which now always writes artifact_hash) and attach by hand.
         from llm_sign.server import sign_openai_responses_turn
 
-        def _sign_legacy_turn(request, response):
+        def _sign_legacy_turn(request, response, *, start_seq=0):
             artifact = sign_openai_responses_turn(
                 request=project_openai_responses_request(request),
                 response=project_openai_responses_response(response),
                 signer=self.signer,
+                start_seq=start_seq,
             )
             envelope = dict(response)
             # Intentionally attach *without* writing artifact_hash, as
@@ -551,7 +559,7 @@ class ResponsesMultiTurnChainTests(unittest.TestCase):
         env1 = _sign_legacy_turn(req1, resp1)
         req2 = _build_request(previous_response_id="resp_1")
         resp2 = _build_response("resp_2", previous_response_id="resp_1")
-        env2 = _sign_legacy_turn(req2, resp2)
+        env2 = _sign_legacy_turn(req2, resp2, start_seq=2)
 
         result = verify_openai_responses_chain(
             [

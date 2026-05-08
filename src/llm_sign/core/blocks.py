@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hmac
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -37,7 +36,6 @@ TOOL_RESULT = "tool_result"
 class Block:
     version: str
     suite_id: str
-    chain_id: bytes
     seq: int
     issuer: str
     key_id: str
@@ -52,7 +50,6 @@ class Block:
             [
                 encode_field("version", encode_text(self.version)),
                 encode_field("suite_id", encode_text(self.suite_id)),
-                encode_field("chain_id", encode_bytes(self.chain_id)),
                 encode_field("seq", encode_uint64(self.seq)),
                 encode_field("issuer", encode_text(self.issuer)),
                 encode_field("key_id", encode_text(self.key_id)),
@@ -72,8 +69,6 @@ class Block:
     def validate_shape(self) -> None:
         if self.version != VERSION:
             raise EncodingError("unsupported block version")
-        if len(self.chain_id) < 16:
-            raise EncodingError("chain_id must be at least 16 octets")
         if self.seq < 0 or self.seq > 2**64 - 1:
             raise EncodingError("seq out of uint64 range")
         validate_identifier(self.suite_id, "suite_id")
@@ -84,16 +79,11 @@ class Block:
         validate_digest(self.payload_digest, "payload_digest", self.suite_id)
         if self.prev_block_digest is not None:
             validate_digest(self.prev_block_digest, "prev_block_digest", self.suite_id)
-        if self.seq == 0 and self.prev_block_digest is not None:
-            raise EncodingError("genesis block must not have prev_block_digest")
-        if self.seq > 0 and self.prev_block_digest is None:
-            raise EncodingError("non-genesis block must have prev_block_digest")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "version": self.version,
             "suite_id": self.suite_id,
-            "chain_id": b64url_encode(self.chain_id),
             "seq": self.seq,
             "issuer": self.issuer,
             "key_id": self.key_id,
@@ -110,7 +100,6 @@ class Block:
         return cls(
             version=str(data["version"]),
             suite_id=str(data["suite_id"]),
-            chain_id=b64url_decode(data["chain_id"]),
             seq=int(data["seq"]),
             issuer=str(data["issuer"]),
             key_id=str(data["key_id"]),
@@ -195,7 +184,7 @@ class TranscriptSigner:
         profile: Profile,
         payload: Any,
         previous: Optional[SignedBlock] = None,
-        chain_id: Optional[bytes] = None,
+        start_seq: int = 0,
     ) -> SignedBlock:
         return sign_payload(
             issuer=self.issuer,
@@ -205,7 +194,7 @@ class TranscriptSigner:
             profile=profile,
             payload=payload,
             previous=previous,
-            chain_id=chain_id,
+            start_seq=start_seq,
             suite_id=self.suite_id,
         )
 
@@ -219,27 +208,29 @@ def sign_payload(
     profile: Profile,
     payload: Any,
     previous: Optional[SignedBlock] = None,
-    chain_id: Optional[bytes] = None,
+    start_seq: int = 0,
     suite_id: Optional[str] = None,
 ) -> SignedBlock:
     actual_suite_id = suite_id or infer_suite_for_private_key(private_key)
     if previous is None:
-        seq = 0
+        # First block of this artifact's chain. ``start_seq`` lets the
+        # caller pick up numbering from a prior turn (Responses API
+        # multi-turn sessions): turn 1 starts at 0, turn 2 starts at
+        # 2, turn 3 at 4, etc. Each turn still ships its own
+        # self-contained chain (prev_block_digest=null on the first
+        # block) — the cross-turn link is by previous_response_hash
+        # in the input payload, not by chain extension.
+        seq = start_seq
         prev_digest = None
-        actual_chain_id = chain_id or os.urandom(16)
     else:
         seq = previous.block.seq + 1
         prev_digest = previous.block.digest()
-        actual_chain_id = previous.block.chain_id
-        if chain_id is not None and chain_id != actual_chain_id:
-            raise ValueError("chain_id does not match previous block")
 
     canonical_payload = profile.canonicalize(payload)
     digest = compute_payload_digest(actual_suite_id, profile.profile_id, canonical_payload)
     block = Block(
         version=VERSION,
         suite_id=actual_suite_id,
-        chain_id=actual_chain_id,
         seq=seq,
         issuer=issuer,
         key_id=key_id,
@@ -335,18 +326,23 @@ def _check_duplicate_seq(seen_seq: Mapping[int, SignedBlock], signed: SignedBloc
 def _check_chain_link(previous: Optional[SignedBlock], signed: SignedBlock) -> None:
     block = signed.block
     if previous is None:
-        if block.seq != 0:
-            raise VerificationError("first block must have seq 0")
+        # First block in this artifact's chain. ``seq`` may be any
+        # nonnegative integer — turns 2..N continue numbering from
+        # the prior turn's last block, so the first block of, say,
+        # turn 3 in a Responses session is signed with seq=4 even
+        # though its ``prev_block_digest`` is null (each turn ships
+        # an independent self-contained artifact, the cross-turn
+        # link is by hash on ``previous_response_hash`` not by chain
+        # extension). What we still require is that the chain head
+        # has no in-artifact predecessor.
         if block.prev_block_digest is not None:
-            raise VerificationError("genesis block has prev_block_digest")
+            raise VerificationError("first block has prev_block_digest")
         return
 
     if block.version != previous.block.version:
         raise VerificationError("version mismatch")
     if block.suite_id != previous.block.suite_id:
         raise VerificationError("suite_id mismatch")
-    if block.chain_id != previous.block.chain_id:
-        raise VerificationError("chain_id mismatch")
     if block.issuer != previous.block.issuer:
         raise VerificationError("issuer mismatch")
     if block.seq != previous.block.seq + 1:

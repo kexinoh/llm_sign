@@ -128,6 +128,7 @@ def sign_openai_responses_turn(
     response: Mapping[str, Any],
     signer: TranscriptSigner,
     parent_hash: Optional[str] = None,
+    start_seq: int = 0,
 ) -> Dict[str, Any]:
     """Sign one OpenAI Responses API request/response turn.
 
@@ -140,11 +141,17 @@ def sign_openai_responses_turn(
     client is responsible for linking consecutive artifacts locally
     (see ``llm_sign.client.verify_openai_responses_chain``).
 
-    Every call produces a fresh 2-block chain (seq 0 = provider_received_input,
-    seq 1 = provider_output) with a fresh ``chain_id``. This mirrors
-    vLLM's stateless signing path and means forked turns (the same
-    ``previous_response_id`` referenced twice) each get their own
-    independent artifact — per the protocol spec, this is expected.
+    Each call produces its own self-contained 2-block chain. ``seq``
+    on the input block defaults to 0; ``start_seq`` lets callers pick
+    up numbering from a prior turn so multi-turn Responses sessions
+    have monotonically-increasing seq across turns (turn 1 = 0,1;
+    turn 2 = 2,3; turn 3 = 4,5; etc). The chain itself is still
+    independent — ``prev_block_digest`` on the first block is
+    ``null`` regardless of ``start_seq``, because forked turns (the
+    same ``previous_response_id`` referenced twice) each get their
+    own artifact and we don't pretend they form a single chain
+    extension. The cross-turn link is by ``previous_response_hash``
+    in the signed input payload (see ``parent_hash``).
 
     ``parent_hash``: when supplied, the server's trusted hash of the
     ``previous_response_id`` turn's artifact. It is injected into the
@@ -177,6 +184,7 @@ def sign_openai_responses_turn(
         block_type=PROVIDER_RECEIVED_INPUT,
         profile=input_profile,
         payload=signed_request,
+        start_seq=start_seq,
     )
     output_block = signer.sign_payload(
         block_type=PROVIDER_OUTPUT,
@@ -273,17 +281,18 @@ def create_artifact(
     # Hoist block fields that are constant across the entire chain
     # into a shared ``common`` envelope. Verifiers merge ``common``
     # back into each block dict before reconstructing the canonical
-    # block bytes, so the signer's view is unchanged. Per the spec
-    # all five hoisted fields *must* be identical across a
-    # baseline-profile chain (suite/chain_id/issuer/key_id/version),
-    # but we still scan rather than assume — if some future extension
-    # legitimately mixes values within a chain, the field stays per-
-    # block and is not hoisted.
+    # block bytes, so the signer's view is unchanged. The four
+    # hoisted fields are equality-enforced across blocks by
+    # ``verify_chain``'s prev-link checks (suite_id/issuer/version
+    # mismatch raises) — this is just the wire serialization
+    # following suit. ``key_id`` is hoisted opportunistically; an
+    # extension that mixed signers within a chain would keep it
+    # per-block.
     signed_dicts = [block.to_dict() for block in chain]
     block_dicts = [signed["block"] for signed in signed_dicts]
     common: Dict[str, Any] = {}
     if block_dicts:
-        for key in ("version", "suite_id", "chain_id", "issuer", "key_id"):
+        for key in ("version", "suite_id", "issuer", "key_id"):
             values = {b.get(key) for b in block_dicts}
             if len(values) == 1 and None not in values:
                 common[key] = block_dicts[0][key]
