@@ -35,7 +35,36 @@ def load_signed_blocks(artifact: Mapping[str, Any]) -> list[SignedBlock]:
         raise ValueError("artifact must contain chain or signed_blocks")
     if not isinstance(chain, list):
         raise ValueError("artifact chain must be a list")
-    return [SignedBlock.from_dict(item) for item in chain]
+    common = artifact.get("common")
+    if common is not None and not isinstance(common, Mapping):
+        raise ValueError("artifact.common must be an object")
+    return [_load_signed_block(item, common) for item in chain]
+
+
+def _load_signed_block(
+    item: Any, common: Optional[Mapping[str, Any]]
+) -> SignedBlock:
+    """Reconstruct a ``SignedBlock`` from its on-wire dict.
+
+    Supports the ``common`` envelope optimization: any block-level
+    field absent from ``item["block"]`` is filled in from
+    ``artifact["common"]``. The merged dict is what
+    :meth:`Block.from_dict` sees, so the reconstructed block encodes
+    byte-for-byte identically to what the signer produced — the
+    signature check downstream is therefore unaffected by this purely
+    representational change.
+    """
+
+    if not isinstance(item, Mapping):
+        raise ValueError("artifact chain entry must be an object")
+    block_dict = item.get("block")
+    if not isinstance(block_dict, Mapping):
+        raise ValueError("artifact chain entry must contain a block object")
+    if common:
+        merged = dict(common)
+        merged.update(block_dict)
+        item = {**dict(item), "block": merged}
+    return SignedBlock.from_dict(item)
 
 
 def check_artifact_protocol_compatibility(

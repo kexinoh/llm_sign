@@ -42,7 +42,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from cryptography import x509
 
-from llm_sign.core.blocks import ChainVerification
+from llm_sign.core.blocks import (
+    PROVIDER_OUTPUT,
+    PROVIDER_RECEIVED_INPUT,
+    ChainVerification,
+)
 from llm_sign.core.crypto import infer_suite_for_public_key
 from llm_sign.keys.ed25519 import StaticKeyPolicy, spki_sha256_key_id
 from llm_sign.keys.tls import certificate_key_id, load_pem_certificates
@@ -137,14 +141,35 @@ def verify_openai_response_with_public_key(
     suite_id: Optional[str] = None,
     platform: Optional[str] = None,
     payloads: Optional[Mapping[int, Any]] = None,
+    request: Optional[Mapping[str, Any]] = None,
 ) -> ChainVerification:
     """Verify an OpenAI-compatible response using a pinned public key.
 
     Convenience wrapper that extracts the artifact from the response and
     delegates to :func:`verify_with_public_key`. All metadata parameters
     behave the same: optional, inferred from the artifact when omitted.
+
+    The user-visible response body — the top-level OpenAI Chat Completions
+    fields the caller actually consumed (``choices``, ``model``, ...) —
+    is automatically pinned to the chain's terminating ``provider_output``
+    block as its expected payload. This closes a substitution attack
+    where a relay leaves the signed artifact intact but rewrites the
+    visible ``response["choices"][...]`` content. Any divergence between
+    the signed transcript and the bytes the user reads results in
+    ``valid=False`` with a ``payload digest mismatch`` error.
+
+    If ``request`` is supplied, it is similarly pinned to the chain's
+    terminating ``provider_received_input`` block. Callers that need to
+    pin earlier turns can still pass an explicit ``payloads`` mapping;
+    those entries take precedence over the automatic pinning.
     """
+
     artifact = artifact_from_openai_response(response)
+    auto_payloads = _user_visible_payloads_from_response(
+        artifact, response=response, request=request,
+    )
+    if payloads:
+        auto_payloads.update(payloads)
     return verify_with_public_key(
         artifact,
         public_key=public_key,
@@ -152,7 +177,7 @@ def verify_openai_response_with_public_key(
         key_id=key_id,
         suite_id=suite_id,
         platform=platform,
-        payloads=payloads,
+        payloads=auto_payloads,
     )
 
 
@@ -263,6 +288,7 @@ def verify_openai_response(
     suite_id: Optional[str] = None,
     platform: Optional[str] = None,
     payloads: Optional[Mapping[int, Any]] = None,
+    request: Optional[Mapping[str, Any]] = None,
 ) -> ChainVerification:
     """Verify an OpenAI response using the provider certificate it carries.
 
@@ -271,6 +297,15 @@ def verify_openai_response(
     validated against the system TLS trust store exactly as an HTTPS
     client would validate a server certificate. The transcript is then
     verified with the public key embedded in the trusted leaf.
+
+    Beyond chain authentication and signature verification, this also
+    pins the **user-visible** response body — the top-level OpenAI
+    fields (``choices``, ``model``, ``response_format``) excluding the
+    ``llm_sign`` envelope — to the signed transcript. A relay that
+    leaves the artifact intact but rewrites those fields will trigger
+    ``payload digest mismatch``. See
+    :func:`verify_openai_response_with_public_key` for the same
+    automatic pinning behaviour.
 
     Parameters
     ----------
@@ -284,6 +319,13 @@ def verify_openai_response(
         When ``False``, the chain is parsed but not validated (trust
         the embedded certificate on its own). Use this only for
         self-signed providers or local development.
+    request:
+        The original request the caller sent to the provider. When
+        supplied, it is pinned to the chain's terminating
+        ``provider_received_input`` block so a relay rewriting the
+        request mid-flight is also caught. Optional because the request
+        is not part of the response envelope; if omitted only the
+        response body is pinned.
 
     Callers that want to skip certificate handling entirely and pin a
     known public key should use :func:`verify_openai_response_with_public_key`.
@@ -303,11 +345,17 @@ def verify_openai_response(
         suite_id=suite_id,
         platform=platform,
         payloads=payloads,
+        request=request,
     )
 
 
 def _first_block_metadata(artifact: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return ``{issuer, key_id, suite_id}`` from the artifact's first block."""
+    """Return ``{issuer, key_id, suite_id}`` from the artifact's first block.
+
+    Looks first at ``artifact.common``, falling back to the per-block
+    dict if a field isn't hoisted (extension profile that legitimately
+    mixes values across blocks).
+    """
     chain = artifact.get("chain", artifact.get("signed_blocks"))
     if not isinstance(chain, list) or not chain:
         return {}
@@ -317,9 +365,12 @@ def _first_block_metadata(artifact: Mapping[str, Any]) -> Mapping[str, Any]:
     block = first.get("block")
     if not isinstance(block, Mapping):
         return {}
+    common = artifact.get("common") if isinstance(artifact.get("common"), Mapping) else {}
     out: Dict[str, Any] = {}
     for k in ("issuer", "key_id", "suite_id"):
         v = block.get(k)
+        if v is None:
+            v = common.get(k)
         if isinstance(v, str):
             out[k] = v
     return out
@@ -337,19 +388,8 @@ def artifact_from_openai_response(response: Mapping[str, Any]) -> Mapping[str, A
 def host_name_from_artifact(artifact: Mapping[str, Any]) -> Optional[str]:
     """Return the host name claimed by the first signed block."""
 
-    chain = artifact.get("chain", artifact.get("signed_blocks"))
-    if not isinstance(chain, list) or not chain:
-        return None
-    signed = chain[0]
-    if not isinstance(signed, Mapping):
-        return None
-    block = signed.get("block")
-    if not isinstance(block, Mapping):
-        return None
-    issuer = block.get("issuer")
-    if not isinstance(issuer, str):
-        return None
-    return issuer
+    issuer = _first_block_metadata(artifact).get("issuer")
+    return issuer if isinstance(issuer, str) else None
 
 
 def verify_openai_response_signature(
@@ -364,6 +404,7 @@ def verify_openai_response_signature(
     suite_id: Optional[str] = None,
     payloads: Optional[Mapping[int, Any]] = None,
     platform: Optional[str] = None,
+    request: Optional[Mapping[str, Any]] = None,
 ) -> OpenAIResponseSignatureReport:
     """Non-raising report on a response's signature status.
 
@@ -374,8 +415,13 @@ def verify_openai_response_signature(
       validated against the system TLS trust store (see
       :func:`verify_openai_response`); pass ``trust_anchors`` or
       ``verify_tls=False`` to override.
-    - Any failure — untrusted chain, bad signature, missing certificate
-      — yields ``valid=False``.
+    - The user-visible response body is automatically pinned to the
+      chain's terminating ``provider_output`` block (see
+      :func:`verify_openai_response_with_public_key`); a relay that
+      rewrites visible content yields ``valid=False``.
+    - Any failure — untrusted chain, bad signature, missing certificate,
+      visible content not matching the signed transcript — yields
+      ``valid=False``.
     """
 
     response_data = openai_response_to_dict(response)
@@ -406,14 +452,15 @@ def verify_openai_response_signature(
             )
 
     try:
-        verification = verify_with_public_key(
-            artifact,
+        verification = verify_openai_response_with_public_key(
+            response_data,
             public_key=resolved_public_key,
             issuer=issuer,
             key_id=key_id,
             suite_id=suite_id,
             platform=platform,
             payloads=payloads,
+            request=request,
         )
     except Exception:
         return OpenAIResponseSignatureReport(
@@ -427,6 +474,375 @@ def verify_openai_response_signature(
         host_name=host_name,
         valid=verification.valid,
     )
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses API wrappers
+# ---------------------------------------------------------------------------
+#
+# The Responses API (``/v1/responses``) is a stateful conversation endpoint:
+# a request may carry ``previous_response_id`` as a pointer to a prior
+# response retained in the provider's store. The envelope layout is
+# identical to Chat Completions — ``response["llm_sign"] = {"artifact":
+# ..., "certificate_chain": ...}`` — so the existing
+# :func:`verify_openai_response*` helpers already work for it. These
+# wrappers exist to make call sites self-documenting and to bundle a
+# Responses-specific multi-turn checker (:func:`verify_openai_responses_chain`)
+# that stitches together the artifacts of consecutive turns in one
+# conversation via their ``previous_response_id`` pointers.
+
+
+def verify_openai_responses_response_with_public_key(
+    response: Mapping[str, Any],
+    *,
+    public_key: Any,
+    issuer: Optional[str] = None,
+    key_id: Optional[str] = None,
+    suite_id: Optional[str] = None,
+    payloads: Optional[Mapping[int, Any]] = None,
+    request: Optional[Mapping[str, Any]] = None,
+) -> ChainVerification:
+    """Verify a Responses API envelope with a pinned signing public key.
+
+    Alias of :func:`verify_openai_response_with_public_key` with the
+    ``platform`` pinned to ``"openai-responses"`` so that the
+    ``previous_response_id`` pointer is interpreted under the Responses
+    API input/output profiles rather than the Chat Completions ones.
+    """
+
+    return verify_openai_response_with_public_key(
+        response,
+        public_key=public_key,
+        issuer=issuer,
+        key_id=key_id,
+        suite_id=suite_id,
+        platform="openai-responses",
+        payloads=payloads,
+        request=request,
+    )
+
+
+def verify_openai_responses_response(
+    response: Mapping[str, Any],
+    *,
+    expected_host: Optional[str] = None,
+    trust_anchors: Optional[Sequence[x509.Certificate]] = None,
+    verify_tls: bool = True,
+    issuer: Optional[str] = None,
+    key_id: Optional[str] = None,
+    suite_id: Optional[str] = None,
+    payloads: Optional[Mapping[int, Any]] = None,
+    request: Optional[Mapping[str, Any]] = None,
+) -> ChainVerification:
+    """Verify a Responses API envelope using its embedded certificate chain.
+
+    Pins the user-visible top-level response body (with the
+    ``llm_sign`` envelope stripped) to the artifact's terminating
+    ``provider_output`` block — same substitution-attack defence as
+    :func:`verify_openai_response` — and verifies the transcript
+    signature against the TLS-authenticated leaf public key.
+
+    The user-visible response is projected through
+    :class:`llm_sign.profiles.openai_responses.OpenAIResponsesOutputProfile`
+    before the digest comparison, so vLLM-only fields (``kv_transfer_params``,
+    ``input_messages``, ``output_messages``, ...) that do not appear in
+    the signed whitelist do not cause canonicalization to fail.
+    """
+
+    return verify_openai_response(
+        response,
+        expected_host=expected_host,
+        trust_anchors=trust_anchors,
+        verify_tls=verify_tls,
+        issuer=issuer,
+        key_id=key_id,
+        suite_id=suite_id,
+        platform="openai-responses",
+        payloads=payloads,
+        request=request,
+    )
+
+
+def verify_openai_responses_response_signature(
+    response: Any,
+    *,
+    public_key: Optional[Any] = None,
+    expected_host: Optional[str] = None,
+    trust_anchors: Optional[Sequence[x509.Certificate]] = None,
+    verify_tls: bool = True,
+    issuer: Optional[str] = None,
+    key_id: Optional[str] = None,
+    suite_id: Optional[str] = None,
+    payloads: Optional[Mapping[int, Any]] = None,
+    request: Optional[Mapping[str, Any]] = None,
+) -> OpenAIResponseSignatureReport:
+    """Non-raising signature report for a Responses API envelope.
+
+    Same behaviour as :func:`verify_openai_response_signature` but
+    pinned to the Responses platform (see
+    :func:`verify_openai_responses_response` for the projection
+    rationale).
+    """
+
+    return verify_openai_response_signature(
+        response,
+        public_key=public_key,
+        expected_host=expected_host,
+        trust_anchors=trust_anchors,
+        verify_tls=verify_tls,
+        issuer=issuer,
+        key_id=key_id,
+        suite_id=suite_id,
+        platform="openai-responses",
+        payloads=payloads,
+        request=request,
+    )
+
+
+@dataclass(frozen=True)
+class ResponsesChainVerification:
+    """Verification status for a linked sequence of Responses API turns."""
+
+    valid: bool
+    errors: List[str]
+    # Per-turn per-envelope verification (same order as the input list)
+    turns: List[ChainVerification]
+
+
+def verify_openai_responses_chain(
+    turns: Sequence[Mapping[str, Any]],
+    *,
+    expected_host: Optional[str] = None,
+    trust_anchors: Optional[Sequence[x509.Certificate]] = None,
+    verify_tls: bool = True,
+    public_key: Optional[Any] = None,
+    issuer: Optional[str] = None,
+    key_id: Optional[str] = None,
+    suite_id: Optional[str] = None,
+) -> ResponsesChainVerification:
+    """Verify a linked sequence of ``/v1/responses`` turns.
+
+    Each element of ``turns`` is a dict ``{"request": ..., "response": ...}``
+    captured from one HTTP round-trip, **in chronological order**. This
+    helper checks three things:
+
+    1. Each envelope verifies on its own (signature valid, certificate
+       chain authenticates, user-visible body pinned to the artifact —
+       same guarantees as :func:`verify_openai_responses_response`).
+    2. The first request's ``previous_response_id`` is ``None`` (this
+       is the conversation root), or matches an externally supplied
+       anchor passed as ``turns[0]["request"]["previous_response_id"]``
+       if the caller is continuing a pre-existing conversation.
+    3. For ``N > 0``, ``turns[N]["request"]["previous_response_id"] ==
+       turns[N-1]["response"]["id"]`` — the chain of parent pointers
+       is self-consistent. Because the pointer is itself inside the
+       signed input payload (see
+       :class:`llm_sign.profiles.openai_responses.OpenAIResponsesInputProfile`'s
+       ``include_fields``), any relay that rewrote it to fork the
+       conversation onto a different parent is caught here.
+
+    Forking is legitimate under the Responses API protocol: the same
+    ``previous_response_id`` may be re-used by multiple create calls.
+    This function does **not** detect forks; it only certifies that
+    *the particular linear sequence the caller presents* is internally
+    consistent. Fork detection is explicitly out of scope per
+    ``spec/normalization.md`` §12.
+    """
+
+    if not turns:
+        return ResponsesChainVerification(
+            valid=False, errors=["empty turn sequence"], turns=[]
+        )
+
+    per_turn_results: List[ChainVerification] = []
+    errors: List[str] = []
+
+    for index, turn in enumerate(turns):
+        request = turn.get("request")
+        response = turn.get("response")
+        if not isinstance(request, Mapping) or not isinstance(response, Mapping):
+            errors.append(
+                f"turn {index}: each turn must be a mapping with "
+                "'request' and 'response' fields"
+            )
+            break
+
+        response_dict = openai_response_to_dict(response)
+
+        # For multi-turn Responses API verification we also reconstruct
+        # the server's view of the request. The provider injects
+        # ``previous_response_hash`` into the signed input payload,
+        # looked up from its own session store. That field is *not*
+        # part of what the client sent on the wire, so the client
+        # request we hold locally has to be augmented with the hash
+        # *we observed* on the parent turn's envelope for the digest
+        # comparison to succeed.
+        #
+        # If the hash we observed agrees with what the server signed,
+        # the envelope's input block digest checks out. If it
+        # disagrees (store poisoning, cross-session grafting), the
+        # digest mismatch is what will flag the attack — precisely the
+        # property we wanted this mechanism to give us.
+        request_for_pinning: Mapping[str, Any] = request
+        if index > 0:
+            prior_response_dict = openai_response_to_dict(
+                turns[index - 1]["response"]
+            )
+            observed_parent_hash = _envelope_artifact_hash(prior_response_dict)
+            if observed_parent_hash is not None:
+                request_for_pinning = {
+                    **dict(request),
+                    "previous_response_hash": observed_parent_hash,
+                }
+
+        # Envelope-level verification (signature, chain, pin user-visible).
+        try:
+            if public_key is not None:
+                verification = verify_openai_responses_response_with_public_key(
+                    response_dict,
+                    public_key=public_key,
+                    issuer=issuer,
+                    key_id=key_id,
+                    suite_id=suite_id,
+                    request=request_for_pinning,
+                )
+            else:
+                verification = verify_openai_responses_response(
+                    response_dict,
+                    expected_host=expected_host,
+                    trust_anchors=trust_anchors,
+                    verify_tls=verify_tls,
+                    issuer=issuer,
+                    key_id=key_id,
+                    suite_id=suite_id,
+                    request=request_for_pinning,
+                )
+        except Exception as exc:
+            errors.append(f"turn {index}: envelope verification raised: {exc}")
+            break
+
+        per_turn_results.append(verification)
+        if not verification.valid:
+            errors.append(
+                f"turn {index}: envelope invalid: {verification.errors}"
+            )
+            break
+
+        # Parent-pointer consistency: the request claims a parent via
+        # previous_response_id, which is itself inside the signed
+        # input payload. For turn 0 we only record the response id;
+        # callers continuing a prior session are responsible for
+        # verifying that session separately.
+        if index == 0:
+            continue
+
+        claimed_parent = request.get("previous_response_id")
+        prior_response_id = _previous_turn_response_id(turns[index - 1])
+        if claimed_parent != prior_response_id:
+            errors.append(
+                f"turn {index}: previous_response_id={claimed_parent!r} does "
+                f"not match prior turn response id {prior_response_id!r}"
+            )
+            break
+
+        # Parent-artifact hash consistency. The provider injects a
+        # server-trusted parent hash into the current turn's signed
+        # input payload as ``previous_response_hash``. This is bound
+        # by the input block's payload digest, not by any cleartext
+        # field on the envelope, so we don't need (and don't have) a
+        # separate field to compare. We rely on the envelope-level
+        # digest check above: ``request_for_pinning`` is reconstructed
+        # using the parent hash we observed locally, so if that
+        # disagrees with what the server signed, the input block's
+        # digest fails (``seq 0: payload digest mismatch``) and the
+        # turn is reported invalid. That's exactly what cross-session
+        # grafting and store-poisoning attacks look like to the client.
+
+        # Cross-turn seq continuity. Each turn ships its own
+        # self-contained 2-block chain, but the seq numbers continue
+        # monotonically across turns within a session: turn N's first
+        # block has ``seq == prior turn's last block seq + 1``. The
+        # value enters the input block's payload digest (it's part
+        # of the ``Block`` canonical encoding), so a mismatch will
+        # already manifest as ``payload digest mismatch`` upstream;
+        # this explicit check just produces a clearer error.
+        prior_last_seq = _last_block_seq(turns[index - 1]["response"])
+        current_first_seq = _first_block_seq(response_dict)
+        if (prior_last_seq is not None
+                and current_first_seq is not None
+                and current_first_seq != prior_last_seq + 1):
+            errors.append(
+                f"turn {index}: seq discontinuity — first block seq "
+                f"{current_first_seq} does not follow prior turn's last "
+                f"seq {prior_last_seq}"
+            )
+            break
+
+    return ResponsesChainVerification(
+        valid=not errors,
+        errors=errors,
+        turns=per_turn_results,
+    )
+
+
+def _envelope_artifact_hash(
+    response: Mapping[str, Any],
+) -> Optional[str]:
+    """Return ``response["llm_sign"]["artifact_hash"]`` if present."""
+
+    llm_sign = response.get("llm_sign")
+    if not isinstance(llm_sign, Mapping):
+        return None
+    value = llm_sign.get("artifact_hash")
+    return value if isinstance(value, str) else None
+
+
+def _previous_turn_response_id(turn: Mapping[str, Any]) -> Optional[str]:
+    response = turn.get("response")
+    if response is None:
+        return None
+    data = openai_response_to_dict(response)
+    value = data.get("id")
+    return value if isinstance(value, str) else None
+
+
+def _first_block_seq(response: Mapping[str, Any]) -> Optional[int]:
+    """Return ``response["llm_sign"]["artifact"]["chain"][0]["block"]["seq"]``."""
+
+    artifact = _optional_artifact_from_openai_response(response)
+    if artifact is None:
+        return None
+    chain = artifact.get("chain")
+    if not isinstance(chain, list) or not chain:
+        return None
+    first = chain[0]
+    if not isinstance(first, Mapping):
+        return None
+    block = first.get("block")
+    if not isinstance(block, Mapping):
+        return None
+    seq = block.get("seq")
+    return seq if isinstance(seq, int) else None
+
+
+def _last_block_seq(response: Any) -> Optional[int]:
+    """Return the seq of the last signed block in a response envelope."""
+
+    data = openai_response_to_dict(response)
+    artifact = _optional_artifact_from_openai_response(data)
+    if artifact is None:
+        return None
+    chain = artifact.get("chain")
+    if not isinstance(chain, list) or not chain:
+        return None
+    last = chain[-1]
+    if not isinstance(last, Mapping):
+        return None
+    block = last.get("block")
+    if not isinstance(block, Mapping):
+        return None
+    seq = block.get("seq")
+    return seq if isinstance(seq, int) else None
 
 
 def verification_summary(result: ChainVerification) -> Dict[str, Any]:
@@ -488,6 +904,135 @@ def _optional_artifact_from_openai_response(
     return artifact
 
 
+def _strip_llm_sign_envelope(response: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a copy of ``response`` without the ``llm_sign`` envelope.
+
+    The envelope is added by the provider for transport and is not
+    part of the OpenAI Chat Completions output schema, so it must be
+    excluded before the body is canonicalized for digest comparison.
+    """
+
+    return {key: value for key, value in response.items() if key != "llm_sign"}
+
+
+def _terminal_block_seqs_by_type(
+    artifact: Mapping[str, Any],
+) -> Dict[str, int]:
+    """Return ``{block_type: last seq}`` for terminating-relevant blocks.
+
+    Used to pin the user-visible request/response bytes to the right
+    block in the signed chain. We only care about the *last* input and
+    the *last* output: those represent the turn the caller actually
+    consumed. Earlier turns can still be pinned via explicit
+    ``payloads``.
+    """
+
+    chain = artifact.get("chain", artifact.get("signed_blocks"))
+    seqs: Dict[str, int] = {}
+    if not isinstance(chain, list):
+        return seqs
+    for signed in chain:
+        if not isinstance(signed, Mapping):
+            continue
+        block = signed.get("block")
+        if not isinstance(block, Mapping):
+            continue
+        block_type = block.get("type")
+        seq = block.get("seq")
+        if not isinstance(block_type, str) or not isinstance(seq, int):
+            continue
+        seqs[block_type] = seq
+    return seqs
+
+
+def _project_request_for_platform(
+    platform: Optional[str],
+    request: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Apply the platform's request-profile projection to a request body.
+
+    Server-side integrations (``vllm/entrypoints/openai/llm_sign.py``)
+    call the matching ``project_*_request`` helper before signing, so
+    that their schema-extending fields (``min_tokens``,
+    ``prompt_logprobs``, ``kv_transfer_params`` ...) are dropped and
+    the canonicalized payload matches what the signer saw. The client
+    must apply the same projection to the user-visible request before
+    pinning it to the terminating ``provider_received_input`` block —
+    otherwise canonicalization trips on "unknown fields" and rejects
+    legitimate traffic.
+    """
+
+    from llm_sign.profiles.openai_chat import project_openai_chat_request
+    from llm_sign.profiles.openai_responses import project_openai_responses_request
+
+    normalized = (platform or "").lower().replace("_", "-")
+    if normalized in {"openai-responses", "responses", "openai-responses-api"}:
+        return project_openai_responses_request(request)
+    # Default: Chat Completions projection. This also covers legacy
+    # artifacts where the ``platform`` field is absent.
+    return project_openai_chat_request(request)
+
+
+def _project_response_for_platform(
+    platform: Optional[str],
+    response: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Apply the platform's response-profile projection to a response body."""
+
+    from llm_sign.profiles.openai_chat import project_openai_chat_response
+    from llm_sign.profiles.openai_responses import project_openai_responses_response
+
+    normalized = (platform or "").lower().replace("_", "-")
+    if normalized in {"openai-responses", "responses", "openai-responses-api"}:
+        return project_openai_responses_response(response)
+    return project_openai_chat_response(response)
+
+
+def _user_visible_payloads_from_response(
+    artifact: Mapping[str, Any],
+    *,
+    response: Mapping[str, Any],
+    request: Optional[Mapping[str, Any]] = None,
+) -> Dict[int, Any]:
+    """Map the user-visible request/response onto chain seqs for digest pinning.
+
+    The platform adapter ordinarily pulls payloads out of the artifact's
+    own ``turns`` field — but those bytes are written by the signer and
+    a relay can keep them aligned with the signature while rewriting
+    the **top-level** response body that the caller actually reads.
+    This helper takes the top-level response (sans ``llm_sign``
+    envelope), and optionally the original request, and pins them to
+    the chain's terminating ``provider_output`` / ``provider_received_input``
+    blocks. Combined with :func:`llm_sign.core.blocks.verify_chain`'s
+    digest check, this guarantees that any divergence between what the
+    user sees and what was signed produces ``payload digest mismatch``.
+
+    The response is projected through the platform's response profile
+    *before* pinning, so integration-specific extensions the provider
+    stripped at sign time (vLLM's ``prompt_logprobs``, ``kv_transfer_params``,
+    etc.) do not cause canonicalization to fail on "unknown fields".
+    Same treatment for ``request``.
+    """
+
+    platform = artifact.get("platform") if isinstance(artifact, Mapping) else None
+
+    seqs = _terminal_block_seqs_by_type(artifact)
+    payloads: Dict[int, Any] = {}
+    output_seq = seqs.get(PROVIDER_OUTPUT)
+    if output_seq is not None:
+        stripped_response = _strip_llm_sign_envelope(response)
+        payloads[output_seq] = _project_response_for_platform(
+            platform, stripped_response,
+        )
+    if request is not None:
+        input_seq = seqs.get(PROVIDER_RECEIVED_INPUT)
+        if input_seq is not None:
+            payloads[input_seq] = _project_request_for_platform(
+                platform, dict(request),
+            )
+    return payloads
+
+
 def _to_json_value(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json", exclude_none=True)
@@ -501,6 +1046,7 @@ def _to_json_value(value: Any) -> Any:
 __all__ = [
     "CertificateTrustError",
     "OpenAIResponseSignatureReport",
+    "ResponsesChainVerification",
     "StaticKeyPolicy",
     "artifact_from_openai_response",
     "certificate_chain_from_openai_response",
@@ -518,6 +1064,10 @@ __all__ = [
     "verify_openai_response",
     "verify_openai_response_signature",
     "verify_openai_response_with_public_key",
+    "verify_openai_responses_chain",
+    "verify_openai_responses_response",
+    "verify_openai_responses_response_signature",
+    "verify_openai_responses_response_with_public_key",
     "verification_summary",
     "verify_with_public_key",
 ]

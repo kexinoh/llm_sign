@@ -22,10 +22,12 @@ def get_platform_adapter(name: str) -> PlatformAdapter:
     from .codex_cli import CodexCliAdapter
     from .kimi_cli import KimiCliAdapter
     from .openai_compatible import OpenAICompatibleAdapter
+    from .openai_responses import OpenAIResponsesAdapter
     from .vllm import VllmAdapter
 
     adapters: tuple[PlatformAdapter, ...] = (
         OpenAICompatibleAdapter(),
+        OpenAIResponsesAdapter(),
         CodexCliAdapter(),
         KimiCliAdapter(),
         VllmAdapter(),

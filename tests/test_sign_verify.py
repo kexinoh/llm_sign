@@ -253,6 +253,54 @@ class SignVerifyTests(unittest.TestCase):
             "model": "gpt-4.1-mini",
             "messages": [{"role": "user", "content": "Say hello"}],
         }
+        response = {
+            "model": "gpt-4.1-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "Hi"},
+                }
+            ],
+        }
+        input_block = self.signer.sign_payload(
+            block_type=PROVIDER_RECEIVED_INPUT,
+            profile=self.input_profile,
+            payload=request,
+        )
+        output_block = self.signer.sign_payload(
+            block_type=PROVIDER_OUTPUT,
+            profile=self.output_profile,
+            payload=response,
+            previous=input_block,
+        )
+
+        # The chain itself is well-formed (input + output); the verifier
+        # is just not given the input payload to re-canonicalize, so
+        # that block stays in the digest_only state. The output is
+        # checked against the actual response bytes.
+        result = verify_chain(
+            [input_block, output_block],
+            key_policy=self.key_policy,
+            profiles=self.profiles,
+            payloads={1: response},
+        )
+
+        self.assertTrue(result.valid, result.errors)
+        self.assertEqual(result.blocks[0].payload_state, PayloadState.DIGEST_ONLY)
+        self.assertEqual(result.blocks[1].payload_state, PayloadState.PAYLOAD_VERIFIED)
+
+    def test_chain_terminating_in_provider_received_input_is_rejected(self):
+        # A relay that signs only the request (and never bothers to
+        # produce or sign a response) leaves a chain whose last block
+        # is provider_received_input. verify_chain must refuse it,
+        # otherwise an attacker could ship a chain whose only
+        # cryptographic guarantee is "the relay saw this prompt" while
+        # the visible content was synthesized.
+        request = {
+            "model": "gpt-4.1-mini",
+            "messages": [{"role": "user", "content": "Say hello"}],
+        }
         signed = self.signer.sign_payload(
             block_type=PROVIDER_RECEIVED_INPUT,
             profile=self.input_profile,
@@ -265,8 +313,14 @@ class SignVerifyTests(unittest.TestCase):
             profiles=self.profiles,
         )
 
-        self.assertTrue(result.valid, result.errors)
-        self.assertEqual(result.blocks[0].payload_state, PayloadState.DIGEST_ONLY)
+        self.assertFalse(result.valid)
+        self.assertTrue(
+            any(
+                "must terminate with a provider_output block" in err
+                for err in result.errors
+            ),
+            msg=result.errors,
+        )
 
 
 if __name__ == "__main__":

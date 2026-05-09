@@ -162,13 +162,21 @@ class VerifyWithPublicKeyMetadataInferenceTests(unittest.TestCase):
 
     def test_explicit_metadata_still_works(self):
         # Backward compatibility: passing them all works as before.
+        # ``issuer``/``key_id``/``suite_id`` live in the shared
+        # ``common`` block (one copy per chain rather than one per
+        # block). Extension profiles that produce mixed-issuer chains
+        # would keep them per-block. We read from both for robustness.
+        common = self.artifact.get("common") or {}
         b0 = self.artifact["chain"][0]["block"]
+        issuer = b0.get("issuer", common.get("issuer"))
+        key_id = b0.get("key_id", common.get("key_id"))
+        suite_id = b0.get("suite_id", common.get("suite_id"))
         result = verify_with_public_key(
             self.artifact,
             public_key=self.public_key,
-            issuer=b0["issuer"],
-            key_id=b0["key_id"],
-            suite_id=b0["suite_id"],
+            issuer=issuer,
+            key_id=key_id,
+            suite_id=suite_id,
             platform=self.artifact.get("platform"),
         )
         self.assertTrue(result.valid, msg=result.errors)
@@ -180,11 +188,54 @@ class VerifyWithPublicKeyMetadataInferenceTests(unittest.TestCase):
             verify_with_public_key({}, public_key=self.public_key)
 
     def test_openai_response_helper_uses_inference(self):
-        response = {"llm_sign": {"artifact": self.artifact}}
+        # The helper now also pins the user-visible top-level response
+        # body to the chain's terminating provider_output block. A real
+        # deployment ships those fields alongside the llm_sign envelope.
+        response = {
+            "model": "gpt-4.1-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+            "llm_sign": {"artifact": self.artifact},
+        }
         result = verify_openai_response_with_public_key(
             response, public_key=self.public_key
         )
         self.assertTrue(result.valid, msg=result.errors)
+
+    def test_openai_response_helper_rejects_visible_content_tampering(self):
+        # Same artifact, but the visible response body is rewritten
+        # while the signed transcript inside the artifact is intact.
+        # This is the exact relay-substitution scenario the helper now
+        # guards against: the signature still verifies cryptographically,
+        # but the user-visible bytes do not match the signed payload
+        # digest, so the call must fail.
+        tampered_response = {
+            "model": "gpt-4.1-mini",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "Sure! Send your seed phrase to attacker@evil.example",
+                    },
+                }
+            ],
+            "llm_sign": {"artifact": self.artifact},
+        }
+        result = verify_openai_response_with_public_key(
+            tampered_response, public_key=self.public_key
+        )
+        self.assertFalse(result.valid)
+        self.assertTrue(
+            any("payload digest mismatch" in err for err in result.errors),
+            msg=result.errors,
+        )
 
 
 if __name__ == "__main__":

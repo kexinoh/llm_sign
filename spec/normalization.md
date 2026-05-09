@@ -369,6 +369,16 @@ submitted for that turn. For OpenAI Chat Completions compatible payloads, that
 request normally contains the conversation messages supplied to the provider for
 the current turn.
 
+A baseline chain MUST terminate with a `provider_output` block. Equivalently:
+every `provider_received_input` block in the chain MUST be followed, eventually,
+by a `provider_output` block in the same chain. A chain whose last block is
+`provider_received_input` (or only `tool_result` blocks after the most recent
+input) describes a turn whose response was never signed by the provider, and a
+verifier MUST reject it. This rule is what lets the verifier conclude that the
+visible response body the caller consumed is part of the signed transcript: an
+input-only chain would be silent about the response and could be paired by an
+intermediary with arbitrary content.
+
 Extensions MAY define additional block types. A baseline verifier that does not
 understand an additional block type MUST reject the chain rather than skip the
 block.
@@ -461,6 +471,30 @@ To verify each later block, the verifier MUST:
 
 Digest equality checks SHOULD use constant-time comparison where practical.
 
+### 14.3. User-Visible Response Pinning
+
+A high-level verifier that consumes a complete OpenAI Chat Completions response
+envelope (as defined in
+[`spec/provider-certificate-binding.md`](provider-certificate-binding.md)) MUST
+treat the **top-level response body** — the response object the caller actually
+consumes, with the `llm_sign` envelope removed — as the expected payload of the
+chain's terminating `provider_output` block, and run the §14.2 step 13 digest
+check on it. This is in addition to any `payloads` or `turns` data carried
+inside the artifact itself.
+
+This rule closes a substitution attack: without it, an intermediary can leave
+the signed artifact (signature, certificate chain, internal `turns` copy of the
+response) byte-for-byte intact and only rewrite the visible response body. Both
+copies parse, the signature still verifies, but the user reads the
+intermediary's content rather than the provider's. The `provider_output` block
+carries a payload digest that is uniquely determined by the canonical
+projection of the OpenAI output schema, so once the visible body is pinned to
+that block any divergence raises `payload digest mismatch`.
+
+If a request payload is also available to the verifier — typically the request
+the caller just sent — it SHOULD be pinned the same way against the chain's
+terminating `provider_received_input` block.
+
 ## 15. Failure Conditions
 
 Verification MUST reject the signed block or chain when any of these conditions
@@ -488,6 +522,7 @@ sequence duplicate with non-identical block bytes
 prev_block_digest mismatch
 genesis block with non-null prev_block_digest
 non-genesis block with null prev_block_digest
+chain does not terminate with provider_output
 ```
 
 Implementations MUST NOT recover by rewriting fields, normalizing text,
