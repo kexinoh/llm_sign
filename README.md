@@ -4,6 +4,11 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/llm-sign.svg)](https://pypi.org/project/llm-sign/)
 [![License](https://img.shields.io/pypi/l/llm-sign.svg)](https://github.com/kexinoh/llm_sign/blob/master/LICENSE)
 
+## Experimental / beta status
+
+This repository and protocol are currently in **beta**. They may introduce
+breaking changes at any time and are **not recommended for production use**.
+
 ## What we are doing (and why)
 
 **In one line: `llm_sign` exists to stop the "relay / gateway / API
