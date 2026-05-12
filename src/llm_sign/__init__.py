@@ -28,13 +28,18 @@ from .core.crypto import (
     supported_suite_ids,
 )
 from .keys.ed25519 import Ed25519KeyPair, StaticKeyPolicy
-from .keys.x509 import LLM_SIGN_ISSUER_OID, LLM_SIGN_TRANSCRIPT_EKU_OID, X509KeyPolicy
 from .profiles.openai_chat import (
     OpenAIChatInputProfile,
     OpenAIChatOutputProfile,
     OpenAIToolResultProfile,
     project_openai_chat_request,
     project_openai_chat_response,
+)
+from .profiles.openai_responses import (
+    OpenAIResponsesInputProfile,
+    OpenAIResponsesOutputProfile,
+    project_openai_responses_request,
+    project_openai_responses_response,
 )
 from .vendor import TLSCertificateCredential
 from .verifier import load_signed_blocks, verify_artifact
@@ -46,6 +51,8 @@ __all__ = [
     "Ed25519KeyPair",
     "OpenAIChatInputProfile",
     "OpenAIChatOutputProfile",
+    "OpenAIResponsesInputProfile",
+    "OpenAIResponsesOutputProfile",
     "OpenAIToolResultProfile",
     "PayloadState",
     "SignedBlock",
@@ -54,16 +61,15 @@ __all__ = [
     "TOOL_RESULT",
     "TranscriptSigner",
     "TLSCertificateCredential",
-    "LLM_SIGN_ISSUER_OID",
-    "LLM_SIGN_TRANSCRIPT_EKU_OID",
     "VerifiedBlock",
-    "X509KeyPolicy",
     "client",
     "infer_suite_for_private_key",
     "infer_suite_for_public_key",
     "load_signed_blocks",
     "project_openai_chat_request",
     "project_openai_chat_response",
+    "project_openai_responses_request",
+    "project_openai_responses_response",
     "sign_payload",
     "register_signature_suite",
     "supported_suite_ids",

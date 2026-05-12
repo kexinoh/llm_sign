@@ -4,10 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-sign"
-version = "0.1.0"
+version = "0.1.1"
 description = "Provider and client helpers for signed LLM transcript verification"
 readme = "README.md"
 requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+  { name = "KEXNA", email = "91727108+kexinoh@users.noreply.github.com" },
+]
+keywords = [
+  "llm",
+  "signature",
+  "verification",
+  "openai",
+  "provenance",
+  "transcript",
+  "cryptography",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security :: Cryptography",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
 dependencies = [
   "cryptography>=42",
 ]
@@ -16,6 +45,17 @@ dependencies = [
 openai = [
   "openai>=1",
 ]
+certifi = [
+  # Soft fallback trust store for systems where ssl.get_default_verify_paths()
+  # returns no usable CA bundle (e.g. minimal containers). llm_sign detects
+  # and uses certifi automatically when installed.
+  "certifi",
+]
+
+[project.urls]
+Homepage = "https://github.com/kexinoh/llm_sign"
+Repository = "https://github.com/kexinoh/llm_sign"
+Issues = "https://github.com/kexinoh/llm_sign/issues"
 
 [project.scripts]
 llm-sign-verify = "llm_sign.cli:main"

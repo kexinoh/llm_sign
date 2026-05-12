@@ -1,6 +1,13 @@
-"""Call an OpenAI-compatible API and verify the returned signed artifact."""
+"""Call an OpenAI-compatible API and verify the returned signed artifact.
 
-import json
+The client does not need any certificate or public key file on disk.
+The provider is expected to ship its TLS certificate alongside the
+signed artifact, at ``response["llm_sign"]["certificate_chain"]``. The
+verifier reads the signing public key out of that certificate. A relay
+that tampers with the request, response, or artifact cannot forge a
+valid signature because it does not hold the provider's private key.
+"""
+
 import os
 
 import llm_sign
@@ -16,7 +23,6 @@ completion = OpenAI(
 )
 
 report = llm_sign.client.verify_openai_response_signature(completion)
-
 print(report)
 
 if completion.choices:

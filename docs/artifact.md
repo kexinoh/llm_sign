@@ -6,18 +6,22 @@ This package is intended to be embedded by tools such as Codex CLI, Kimi CLI,
 vLLM-compatible servers, and other OpenAI-compatible clients. Providers use
 `llm_sign.vendor`; clients use `llm_sign.client` or the `llm-sign-verify` CLI.
 
-The package does not depend on internal platform logs. Integrations SHOULD emit
-the normalized artifact contract below.
+The threat model is middleman / relay tampering. A client that talks
+through a relay or gateway cannot learn the real provider's public
+key from its own TLS session — that handshake only authenticates the
+relay. `llm_sign` solves this by having the provider sign transcripts
+with its TLS private key and ship the matching TLS certificate chain
+alongside the signed response. The client authenticates the chain
+using the standard TLS / X.509 rules it would apply to any HTTPS
+server certificate, and then verifies the transcript under the
+validated leaf's public key.
 
-In relay deployments, the client may connect to an intermediary rather than the
-LLM supplier. In that case the intermediary TLS certificate is only transport
-security for the client-to-intermediary hop. It is not the transcript signing
-identity. The supplier SHOULD return its issuer certificate chain together with
-the first signed response, and verifiers SHOULD validate that supplier chain
-against their configured TLS or deployment trust anchors before using the leaf
-certificate public key to verify transcript signatures.
+The full certificate-handling spec is in
+[`../spec/provider-certificate-binding.md`](../spec/provider-certificate-binding.md);
+there is no new PKI — Web PKI and system TLS trust stores are reused.
 
-For vLLM, the provider side can load the same TLS files passed to `vllm serve`:
+For vLLM, the provider side can load the same TLS files passed to
+`vllm serve`:
 
 ```sh
 vllm serve "/path/to/model" \
@@ -25,9 +29,11 @@ vllm serve "/path/to/model" \
   --ssl-keyfile "/etc/letsencrypt/live/example.com/privkey.pem"
 ```
 
-Those files may contain RSA, ECDSA, or Ed25519 keys. The package infers the
-signing suite from the private key and derives `key_id` from the leaf
-certificate SPKI.
+Those files may contain RSA or ECDSA keys (Ed25519 is supported by
+the signing suites but not yet by the public Web PKI, so Ed25519
+providers typically run under a private trust anchor or in
+trust-on-first-use mode). The package infers the signing suite from
+the private key and derives `key_id` from the leaf certificate SPKI.
 
 ## Artifact Object
 
@@ -52,8 +58,9 @@ payloads  Optional seq-indexed payload object. Overrides missing turn payloads.
 
 ## OpenAI-Compatible Response Envelope
 
-For OpenAI-compatible APIs, a signed response can carry the artifact under a
-provider extension field:
+For OpenAI-compatible APIs, a signed response carries both the
+artifact and the provider's TLS certificate chain under a provider
+extension field:
 
 ```json
 {
@@ -74,22 +81,53 @@ provider extension field:
 }
 ```
 
-`llm_sign.certificate_chain` is an ordered PEM certificate chain with the
-supplier transcript signing certificate first. It is discovery material, not a
-signed field. A verifier MUST still validate the chain to a configured trust
-anchor and MUST check that the leaf certificate SPKI-derived `key_id` matches
-the signed blocks before accepting the artifact.
+`llm_sign.certificate_chain` is an ordered PEM certificate list, leaf
+first. The verifier authenticates it under the standard TLS / X.509
+server-certificate rules (see
+[`../spec/provider-certificate-binding.md`](../spec/provider-certificate-binding.md))
+and then cross-checks the validated leaf's SPKI against the signed
+`key_id`. The field itself is not covered by the transcript signature;
+integrity of the signer binding is enforced by the SPKI match.
 
-For relay or gateway deployments, the `certificate_chain` belongs to the LLM
-supplier, not to the intermediary that delivered the HTTPS response. The
-intermediary may forward or cache this field, but it does not become the signer
-unless it signs its own artifact as a distinct issuer.
+The provider's signing suite is tied to the certificate public-key
+algorithm: RSA certificates sign with `sha256-rsa-pss-v1`, P-256
+certificates sign with `sha256-ecdsa-p256-v1`, and Ed25519
+certificates sign with `sha256-ed25519-v1`. The verifier rejects any
+block whose `suite_id` is incompatible with the leaf SPKI.
 
-Clients that must keep working with providers that do not yet support this
-extension can call `llm_sign.client.verify_openai_response_signature(...)`. That
-helper returns a report with `has_signature`, `host_name`, and `valid`.
-Unsigned responses produce `has_signature: false` and `valid: null` instead of a
-verification exception; signed but invalid responses produce `valid: false`.
+Clients that need to keep working with providers that do not yet
+support this extension can call
+`llm_sign.client.verify_openai_response_signature(...)`. That helper
+returns a report with `has_signature`, `host_name`, and `valid`.
+Unsigned responses produce `has_signature: false` and `valid: null`;
+signed responses produce `valid: true` when the certificate chain is
+trusted **and** the signature verifies, and `valid: false` on any
+failure (untrusted chain, bad signature, missing certificate, host
+mismatch, etc).
+
+## Client Options
+
+The default client path (`llm_sign.client.verify_openai_response`):
+
+1. Reads `llm_sign.certificate_chain` from the response.
+2. Validates the chain against the system TLS trust store using
+   `cryptography.x509.verification`, matching the expected host
+   against the leaf's subjectAltName. The expected host defaults to
+   the `issuer` field on the signed artifact's first block.
+3. Cross-checks the signed `key_id` against the validated leaf's
+   SPKI-SHA256.
+4. Verifies the transcript with the leaf public key.
+
+For deployments that cannot use Web PKI:
+
+- Pass an explicit `trust_anchors=[...]` list of `x509.Certificate`
+  objects to use a private CA set instead of the system store.
+- Pass `verify_tls=False` to skip chain validation and trust the
+  embedded certificate on its own (trust-on-first-use). Use this only
+  for self-signed providers or local development.
+- Use `verify_openai_response_with_public_key(public_key=...)` to
+  skip certificate handling entirely and pin a known provider public
+  key.
 
 ## Turn Payloads
 
@@ -126,14 +164,18 @@ links. The block payload state will be `digest_only`.
 
 ## CLI Verification
 
-Static-key verification is available for deployments that intentionally pin a
-bare public key:
+Static-key verification pins a bare public key (or a PEM certificate
+whose public key is extracted):
 
 ```sh
 llm-sign-verify artifact.json \
-  --issuer provider.example \
-  --public-key provider-ed25519-public.pem
+  --issuer api.example.com \
+  --public-key provider-cert.pem
 ```
+
+This bypasses the TLS / X.509 chain check entirely; use it for audits
+and post-hoc forensics where you already know which public key to
+trust.
 
 The command writes compact JSON:
 
@@ -151,21 +193,5 @@ The command writes compact JSON:
 }
 ```
 
-The process exits with status `0` when the artifact is valid and `1` otherwise.
-
-For X.509 verification, pass the supplier certificate chain as discovery
-material and one or more trust anchors. If a relay response contains
-`llm_sign.certificate_chain`, write that supplier chain to a PEM file before
-calling the CLI:
-
-```sh
-llm-sign-verify artifact.json \
-  --issuer example.com \
-  --certificate-chain supplier-chain.pem \
-  --trust-anchor root-ca.pem \
-  --tls-server-name-mode
-```
-
-`--tls-server-name-mode` binds the block issuer to the leaf certificate DNS name
-and permits `serverAuth` certificates. Without that flag, the verifier expects
-the dedicated transcript-signing issuer extension and EKU.
+The process exits with status `0` when the artifact is valid and `1`
+otherwise.

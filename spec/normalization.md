@@ -22,7 +22,10 @@ to the preceding block. The resulting chain provides issuer authentication,
 payload integrity, and ordering integrity for the signed statements.
 
 Issuer public keys are resolved by a verifier-defined key policy. The baseline
-CA key policy is specified in [ISSUER-PKI].
+key policy authenticates the provider certificate the response envelope
+carries using the standard TLS / X.509 server-certificate validation
+procedure (see `spec/provider-certificate-binding.md`); the transcript
+signature is then verified under the leaf public key of that certificate.
 
 ## 2. Conventions and Definitions
 
@@ -102,16 +105,26 @@ resolve this tuple under its key policy to exactly one trusted public key before
 accepting a signature. If key resolution returns zero keys, multiple keys, an
 expired key, or a key outside the verifier policy, verification MUST fail.
 
-The baseline CA key policy uses X.509 certificate path validation and the CA
-model commonly used with TLS. It is specified in [ISSUER-PKI]. Transport TLS
-authentication alone MUST NOT be treated as transcript signature verification;
-the transcript block still has to be signed and verified.
+The baseline key policy obtains the provider's public key from the TLS
+certificate the provider ships alongside its signed response (see
+`docs/artifact.md` and
+[`spec/provider-certificate-binding.md`](provider-certificate-binding.md)).
+That certificate MUST be authenticated the same way an HTTPS client
+authenticates a server certificate: standard X.509 chain validation
+against a set of trust anchors, with the expected host matched against
+the leaf's subjectAltName. No new PKI is introduced.
 
-When a transcript is delivered through a relay or gateway, the client-visible
-TLS connection authenticates only that relay hop. Supplier key discovery can be
-carried in wrapper metadata such as a response-envelope certificate chain, but
-the discovered chain still has to validate under the verifier key policy before
-any transcript signature is accepted.
+Transport TLS authentication of an intermediary connection alone MUST
+NOT be treated as transcript signature verification. When a transcript
+is delivered through a relay or gateway the client-visible TLS
+connection authenticates only that relay hop; the signed block must
+still be independently verified by the public key extracted from the
+authenticated provider certificate.
+
+The signed `key_id` MUST be an SPKI-SHA256 binding to the leaf public
+key of that provider certificate, so that a verifier can detect any
+substitution between the authenticated certificate and the key that
+actually produced the signature.
 
 ## 5. Primitive Encoding
 
@@ -356,6 +369,16 @@ submitted for that turn. For OpenAI Chat Completions compatible payloads, that
 request normally contains the conversation messages supplied to the provider for
 the current turn.
 
+A baseline chain MUST terminate with a `provider_output` block. Equivalently:
+every `provider_received_input` block in the chain MUST be followed, eventually,
+by a `provider_output` block in the same chain. A chain whose last block is
+`provider_received_input` (or only `tool_result` blocks after the most recent
+input) describes a turn whose response was never signed by the provider, and a
+verifier MUST reject it. This rule is what lets the verifier conclude that the
+visible response body the caller consumed is part of the signed transcript: an
+input-only chain would be silent about the response and could be paired by an
+intermediary with arbitrary content.
+
 Extensions MAY define additional block types. A baseline verifier that does not
 understand an additional block type MUST reject the chain rather than skip the
 block.
@@ -448,6 +471,30 @@ To verify each later block, the verifier MUST:
 
 Digest equality checks SHOULD use constant-time comparison where practical.
 
+### 14.3. User-Visible Response Pinning
+
+A high-level verifier that consumes a complete OpenAI Chat Completions response
+envelope (as defined in
+[`spec/provider-certificate-binding.md`](provider-certificate-binding.md)) MUST
+treat the **top-level response body** — the response object the caller actually
+consumes, with the `llm_sign` envelope removed — as the expected payload of the
+chain's terminating `provider_output` block, and run the §14.2 step 13 digest
+check on it. This is in addition to any `payloads` or `turns` data carried
+inside the artifact itself.
+
+This rule closes a substitution attack: without it, an intermediary can leave
+the signed artifact (signature, certificate chain, internal `turns` copy of the
+response) byte-for-byte intact and only rewrite the visible response body. Both
+copies parse, the signature still verifies, but the user reads the
+intermediary's content rather than the provider's. The `provider_output` block
+carries a payload digest that is uniquely determined by the canonical
+projection of the OpenAI output schema, so once the visible body is pinned to
+that block any divergence raises `payload digest mismatch`.
+
+If a request payload is also available to the verifier — typically the request
+the caller just sent — it SHOULD be pinned the same way against the chain's
+terminating `provider_received_input` block.
+
 ## 15. Failure Conditions
 
 Verification MUST reject the signed block or chain when any of these conditions
@@ -475,6 +522,7 @@ sequence duplicate with non-identical block bytes
 prev_block_digest mismatch
 genesis block with non-null prev_block_digest
 non-genesis block with null prev_block_digest
+chain does not terminate with provider_output
 ```
 
 Implementations MUST NOT recover by rewriting fields, normalizing text,
@@ -506,14 +554,19 @@ requires an extension it does not support.
 ## 17. Security Considerations
 
 The signed block authenticates only the fields covered by `encode_block`.
-Container metadata, cached digests, and discovered certificate chains are not
-signed by the transcript signature unless a profile or extension explicitly
-commits to them.
+Container metadata and cached digests are not signed by the transcript
+signature unless a profile or extension explicitly commits to them.
 
-In relay deployments, a discovered certificate chain identifies the supplier
-only after path validation and issuer/key binding checks. A verifier MUST NOT
-substitute the relay's TLS peer certificate for the supplier certificate unless
-the relay is the signed block issuer.
+In relay deployments the provider's TLS certificate chain carried in
+the response envelope is the verifier's channel for obtaining the
+provider's signing public key. The verifier MUST authenticate that
+chain under the TLS / X.509 rules of the trust anchors it is
+configured with, and MUST check that the validated leaf's
+SubjectPublicKeyInfo hashes to the signed `key_id`. A relay cannot
+forge a valid signature because it does not hold the provider's
+private key, and cannot swap the embedded chain for one it controls
+unless it also controls the DNS name bound to the signed `issuer`
+under those trust anchors.
 
 Profile design is security-critical. Omitting model-visible material from a
 profile can cause different interactions to share the same canonical payload.
@@ -553,15 +606,13 @@ this specification and by the profile.
 
 A baseline version 1 verifier conforms only if it supports
 `sha256-ed25519-v1`, `provider_received_input`, `provider_output`, the baseline
-chain rules, and a key policy. A CA-mode verifier additionally conforms to
-[ISSUER-PKI].
+chain rules, and a key policy that obtains the signer's public key from the
+response-embedded provider certificate under the binding in
+[`spec/provider-certificate-binding.md`](provider-certificate-binding.md).
 
 ## 20. References
 
 ### 20.1. Normative References
-
-[ISSUER-PKI]
-: llm_sign, "Issuer PKI Profile", `spec/issuer-pki.md`.
 
 [RFC2119]
 : Bradner, S., "Key words for use in RFCs to Indicate Requirement Levels",

@@ -1,18 +1,16 @@
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional
 from urllib import request as urllib_request
 
-from cryptography import x509
 from llm_sign import ChainVerification
 from llm_sign.blocks import PROVIDER_OUTPUT, PROVIDER_RECEIVED_INPUT, TOOL_RESULT
 from llm_sign.client import (
     StaticKeyPolicy,
-    X509KeyPolicy,
     artifact_from_openai_response,
-    certificate_chain_from_openai_response,
+    public_key_from_openai_response,
     verify_artifact,
-    x509_key_policy_from_certificate_chain,
+    verify_openai_response_with_public_key,
 )
 
 from tests.e2e_support.constants import ISSUER, SUITE_ID
@@ -102,26 +100,45 @@ class SignedChatClient:
         return _payloads_for_artifact(self._payloads, artifact, request, response)
 
 
-class CertificateChainSignedChatClient:
+class EmbeddedCertificateSignedChatClient:
+    """Client that reads the provider public key from the response itself.
+
+    The response carries the provider's TLS certificate chain at
+    ``llm_sign.certificate_chain`` (leaf first). The client authenticates
+    that chain the same way an HTTPS client would — standard TLS / X.509
+    validation against a set of trust anchors, with SAN name matching —
+    and then verifies the signed artifact against the validated leaf's
+    public key.
+    """
+
     def __init__(
         self,
         *,
         endpoint: str,
-        trust_anchors: Sequence[x509.Certificate],
+        trust_anchors=None,
+        expected_host=None,
+        verify_tls: bool = True,
     ) -> None:
         self.endpoint = endpoint
-        self.trust_anchors = list(trust_anchors)
+        self.trust_anchors = trust_anchors
+        self.expected_host = expected_host
+        self.verify_tls = verify_tls
         self._payloads = {}
-        self._key_policy_cache: Optional[X509KeyPolicy] = None
 
     def create_chat_completion(self, request: Mapping[str, Any]) -> VerifiedChatCompletion:
         response = self._post_json(request)
         artifact = artifact_from_openai_response(response)
         signed_response = artifact["turns"][-1]["response"]
         payloads = self._payloads_for_artifact(artifact, request, signed_response)
-        verification = verify_artifact(
-            artifact,
-            key_policy=self._key_policy(response),
+        public_key = public_key_from_openai_response(
+            response,
+            expected_host=self.expected_host,
+            trust_anchors=self.trust_anchors,
+            verify_tls=self.verify_tls,
+        )
+        verification = verify_openai_response_with_public_key(
+            response,
+            public_key=public_key,
             payloads=payloads,
         )
         if verification.valid:
@@ -142,18 +159,6 @@ class CertificateChainSignedChatClient:
         )
         with urllib_request.urlopen(request, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
-
-    def _key_policy(self, response: Mapping[str, Any]) -> X509KeyPolicy:
-        supplier_chain = certificate_chain_from_openai_response(response, required=False)
-        if supplier_chain is None:
-            if self._key_policy_cache is None:
-                raise ValueError("response must include llm_sign.certificate_chain")
-            return self._key_policy_cache
-        self._key_policy_cache = x509_key_policy_from_certificate_chain(
-            supplier_chain,
-            trust_anchors=self.trust_anchors,
-        )
-        return self._key_policy_cache
 
     def _payloads_for_artifact(
         self,
@@ -204,4 +209,3 @@ def _tool_call_id_for_block(artifact: Mapping[str, Any], seq: int) -> Optional[s
         if isinstance(tool_call_id, str):
             return tool_call_id
     return None
-

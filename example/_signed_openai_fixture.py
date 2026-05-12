@@ -1,4 +1,10 @@
-"""Static signed OpenAI-compatible response used by examples."""
+"""Static signed OpenAI-compatible response used by examples.
+
+The fixture ships both the signed artifact and the provider's TLS
+certificate (at ``llm_sign.certificate_chain``). The client verifies
+the artifact by reading the signing public key out of that certificate.
+No CA / PKI validation is performed.
+"""
 
 from __future__ import annotations
 
@@ -7,24 +13,17 @@ from collections.abc import Mapping
 from typing import Any
 
 
+# Provider self-signed Ed25519 certificate. Its embedded public key is
+# the one that produced the signatures in the artifact below, so the
+# signed ``key_id`` matches ``spki-sha256(certificate public key)``.
 SUPPLIER_CERTIFICATE_CHAIN_PEM = [
     """-----BEGIN CERTIFICATE-----
-MIIBOzCB7qADAgECAgFlMAUGAytlcDAgMR4wHAYDVQQDDBVsbG0tc2lnbiBleGFt
-cGxlIHJvb3QwHhcNMjQwMTAxMDAwMDAwWhcNMzQwMTAxMDAwMDAwWjAbMRkwFwYD
-VQQDDBBwcm92aWRlci5leGFtcGxlMCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vA
-mWfk1jCbpQ1fHdyGZBJVMbijUjBQMAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQD
-AgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBsGA1UdEQQUMBKCEHByb3ZpZGVyLmV4
-YW1wbGUwBQYDK2VwA0EA5teNZ/Y9N1SwCipDPZtuX5k5shcavFAKj792ATEVK8VI
-6+DpcNr7iaU1PDpBX5DhXC76fVVMJOZA5v7PCpX3AQ==
------END CERTIFICATE-----
-""",
-    """-----BEGIN CERTIFICATE-----
-MIIBFDCBx6ADAgECAgFkMAUGAytlcDAgMR4wHAYDVQQDDBVsbG0tc2lnbiBleGFt
-cGxlIHJvb3QwHhcNMjQwMTAxMDAwMDAwWhcNMzQwMTAxMDAwMDAwWjAgMR4wHAYD
-VQQDDBVsbG0tc2lnbiBleGFtcGxlIHJvb3QwKjAFBgMrZXADIQAprLrhQbzK8LIu
-GpTTTQvHNh5SbQv+EsiXlLyTIpZt16MmMCQwEgYDVR0TAQH/BAgwBgEB/wIBATAO
-BgNVHQ8BAf8EBAMCAYYwBQYDK2VwA0EASTWiW1qdgHnrat5jfrwU6U07iGXR0xsk
-zQ192jjJPpyThrJrBbImEu/A7M/SybkRLAx0u4VtJGjA3uIQS3m6Cg==
+MIIBAzCBtqADAgECAgEBMAUGAytlcDAbMRkwFwYDVQQDDBBwcm92aWRlci5leGFt
+cGxlMB4XDTI0MDEwMTAwMDAwMFoXDTQ0MDEwMTAwMDAwMFowGzEZMBcGA1UEAwwQ
+cHJvdmlkZXIuZXhhbXBsZTAqMAUGAytlcAMhAAOhB7/zzhC+HXDdGOdLwJln5NYw
+m6UNXx3chmQSVTG4ox8wHTAbBgNVHREEFDASghBwcm92aWRlci5leGFtcGxlMAUG
+AytlcANBAA4qX4NimZAdNgpxktWMc/j5aHVLTzdyU/lb+mEpJkkJdikSl1nUC1S2
+syU81pYjaIjuRoC3I5HyFBjkjMsdnQc=
 -----END CERTIFICATE-----
 """,
 ]

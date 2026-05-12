@@ -1,0 +1,37 @@
+llm_sign 0.1.0
+
+  [RSA-2048    ] signer.suite=sha256-rsa-pss-v1        infer_suite=sha256-rsa-pss-v1         cert PEM bytes=1115
+  [ECDSA-P256  ] signer.suite=sha256-ecdsa-p256-v1     infer_suite=sha256-ecdsa-p256-v1      cert PEM bytes=579
+  [Ed25519     ] signer.suite=sha256-ed25519-v1        infer_suite=sha256-ed25519-v1         cert PEM bytes=493
+
+scenario                         suite                mean     median        p90        p99  chain B
+--------------------------------------------------------------------------------------------------------
+tiny (~700 B resp)               RSA-2048          0.626ms    0.612ms    0.633ms    0.874ms     1115
+                                 ECDSA-P256        0.167ms    0.165ms    0.178ms    0.181ms      579
+                                 Ed25519           0.177ms    0.177ms    0.183ms    0.188ms      493
+  (request JSON=425B, response JSON=638B)
+typical (1K req / 512 resp)      RSA-2048          0.625ms    0.613ms    0.622ms    0.867ms     1115
+                                 ECDSA-P256        0.168ms    0.168ms    0.174ms    0.179ms      579
+                                 Ed25519           0.182ms    0.181ms    0.190ms    0.191ms      493
+  (request JSON=1,225B, response JSON=1,022B)
+20K req                          RSA-2048          0.692ms    0.679ms    0.696ms    0.941ms     1115
+                                 ECDSA-P256        0.231ms    0.229ms    0.237ms    0.240ms      579
+                                 Ed25519           0.241ms    0.240ms    0.247ms    0.249ms      493
+  (request JSON=20,225B, response JSON=1,022B)
+200K req, 128 resp               RSA-2048          1.351ms    1.338ms    1.351ms    1.594ms     1115
+                                 ECDSA-P256        0.885ms    0.881ms    0.897ms    0.914ms      579
+                                 Ed25519           0.902ms    0.893ms    0.906ms    1.105ms      493
+  (request JSON=200,225B, response JSON=638B)
+200K req, 2K resp                RSA-2048          1.259ms    1.231ms    1.486ms    1.505ms     1115
+                                 ECDSA-P256        0.787ms    0.787ms    0.795ms    0.796ms      579
+                                 Ed25519           0.790ms    0.797ms    0.805ms    0.808ms      493
+  (request JSON=200,225B, response JSON=2,505B)
+800K req (~200K tok), 128 resp   RSA-2048          3.561ms    3.551ms    3.585ms    3.754ms     1115
+                                 ECDSA-P256        3.059ms    3.065ms    3.084ms    3.118ms      579
+                                 Ed25519           3.074ms    3.077ms    3.103ms    3.109ms      493
+  (request JSON=800,225B, response JSON=638B)
+
+--- pure asymmetric sign() on a 32-byte digest-sized message ---
+  [RSA-2048    ] n=1000 mean=  245.1us median=  236.1us  p99=  494.1us
+  [ECDSA-P256  ] n=1000 mean=   21.5us median=   21.3us  p99=   25.7us
+  [Ed25519     ] n=1000 mean=   30.8us median=   30.6us  p99=   35.4us
