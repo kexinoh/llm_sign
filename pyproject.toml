@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-sign"
-version = "0.1.1"
+version = "0.2.0"
 description = "Provider and client helpers for signed LLM transcript verification"
 readme = "README.md"
 requires-python = ">=3.9"
